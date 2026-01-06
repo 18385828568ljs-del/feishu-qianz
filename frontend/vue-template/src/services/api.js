@@ -36,7 +36,7 @@ export async function authStatus(sessionId) {
   return data // { authorized, expires_at, user }
 }
 
-export async function uploadSignature({ blob, fileName, sessionId, folderToken, useUserToken = 1, openId, tenantKey }) {
+export async function uploadSignature({ blob, fileName, sessionId, folderToken, useUserToken = 1, openId, tenantKey, hasQuota = false }) {
   const form = new FormData()
   form.append('file', blob, fileName || 'signature.png')
   form.append('file_name', fileName || 'signature.png')
@@ -45,6 +45,7 @@ export async function uploadSignature({ blob, fileName, sessionId, folderToken, 
   if (folderToken) form.append('folder_token', folderToken)
   if (openId) form.append('open_id', openId)
   if (tenantKey) form.append('tenant_key', tenantKey)
+  form.append('has_quota', hasQuota ? 1 : 0)  // 飞书官方付费权益标记
   const { data } = await api.post('/api/sign/upload', form)
   return data.file_token
 }

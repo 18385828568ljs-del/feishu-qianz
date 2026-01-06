@@ -361,21 +361,27 @@ async def upload_signature(
     use_user_token: int = Form(0, description="是否使用用户 token (1=是, 0=否)"),
     folder_token: Optional[str] = Form(None, description="目标文件夹 token"),
     session_id: Optional[str] = Form(None, description="用户会话 ID"),
+    has_quota: int = Form(0, description="飞书官方付费权益 (1=有权益, 0=无)"),
 ):
     """
     上传签名文件到飞书云空间。
     
     - **用户模式**: 使用 use_user_token=1 和有效的 session_id
     - **应用模式**: 使用 use_user_token=0 和 folder_token
+    - **付费权益**: 如果 has_quota=1（飞书官方付费用户），跳过本地配额扣减
     
     返回文件 token 和本地存储路径。
     """
     # Debug logging
-    logger.info(f"Upload request: use_user_token={use_user_token}, session_id={session_id}, folder_token={folder_token}, file_name={file_name}")
+    logger.info(f"Upload request: use_user_token={use_user_token}, session_id={session_id}, folder_token={folder_token}, file_name={file_name}, has_quota={has_quota}")
     
     # 1) 配额检查（使用数据库服务）
+    # 如果飞书官方付费权益有效 (has_quota=1)，直接允许且不扣本地配额
     consume_quota_after = False
-    if DB_AVAILABLE:
+    if has_quota == 1:
+        logger.info(f"Feishu official quota valid for {open_id}, skipping local quota check")
+        consume_quota_after = False
+    elif DB_AVAILABLE:
         db = next(get_db())
         try:
             chk = quota_service.check_can_sign(db, open_id, tenant_key)

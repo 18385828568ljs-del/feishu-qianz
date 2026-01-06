@@ -34,6 +34,12 @@ const quota = ref({
   inviteExpireAt: null,
 })
 
+// 飞书官方付费上下文
+const feishuPayContext = ref({
+  isNeedPayPack: false,  // 是否是付费插件
+  hasQuota: false,       // 用户是否有付费权益
+})
+
 // 弹窗状态
 const showInviteDialog = ref(false)
 const showRechargeDialog = ref(false)
@@ -71,6 +77,9 @@ function formatDate(timestamp) {
 
 // 检查是否可以签名
 const canSign = computed(() => {
+  // 飞书官方付费：有权益直接允许
+  if (feishuPayContext.value.hasQuota) return true
+  // 本地配额：邀请码有效或有剩余次数
   return quota.value.inviteActive || quota.value.remaining > 0
 })
 
@@ -117,7 +126,17 @@ async function init() {
       userInfo.value.tenantKey = 'anonymous'
     }
     
-    // 加载配额信息
+    // 获取飞书付费上下文参数
+    try {
+      const env = await bitable.bridge.getEnv?.() || {}
+      feishuPayContext.value.isNeedPayPack = env.isNeedPayPack || false
+      feishuPayContext.value.hasQuota = env.hasQuota || false
+      console.log('[Feishu Pay Context]', feishuPayContext.value)
+    } catch (e) {
+      console.warn('[Feishu Pay Context] Failed to get:', e)
+    }
+    
+    // 加载配额信息（仅当飞书付费无权益时才依赖本地配额）
     await loadQuota()
   } catch (e) {
     // 初始化错误仅在开发环境输出
@@ -265,21 +284,28 @@ async function onConfirm(blob) {
     await table.setCellValue(state.value.attachFieldId, state.value.recordId, cell.val)
     ElMessage.success('签名完成')
     
-    // 更新配额显示（不管是否消耗，都刷新一次）
-    await loadQuota()
-    
-    // 异步备份到后端（不阻塞主流程）
+    // 调用后端备份并扣减配额（同步等待完成）
+    // 如果有飞书官方付费权益，传递 hasQuota=true 让后端跳过本地配额扣减
     if (authorized.value && sessionId.value) {
-      uploadSignature({
-        blob,
-        fileName,
-        sessionId: sessionId.value,
-        useUserToken: 1,
-        folderToken: undefined,
-      }).catch(() => {
-        // 备份失败不影响主流程
-      })
+      try {
+        await uploadSignature({
+          blob,
+          fileName,
+          sessionId: sessionId.value,
+          useUserToken: 1,
+          folderToken: undefined,
+          openId: userInfo.value.openId,
+          tenantKey: userInfo.value.tenantKey,
+          hasQuota: feishuPayContext.value.hasQuota,  // 飞书官方付费权益标记
+        })
+      } catch (e) {
+        // 备份失败不影响主流程，仅记录日志
+        if (import.meta.env.DEV) console.warn('[Backup]', e)
+      }
     }
+    
+    // 后端处理完成后，刷新配额显示
+    await loadQuota()
     
     // 成功完成，直接返回
   } catch (e) {
