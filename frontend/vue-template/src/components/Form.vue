@@ -42,16 +42,11 @@ const feishuPayContext = ref({
 
 // 弹窗状态
 const showInviteDialog = ref(false)
-const showRechargeDialog = ref(false)
 const showShareFormDialog = ref(false)
 const activeButton = ref('')  // 当前选中的按钮
 const toastMessage = ref('')  // 自定义 Toast 消息
 const toastType = ref('info') // Toast 类型
 const inviteCode = ref('')
-// 套餐列表（从 API 加载）
-const pricingPlans = ref([])
-const loadingPlans = ref(false)
-const currentOrder = ref(null)
 
 // 分享表单相关
 const shareFormName = ref('')
@@ -659,12 +654,6 @@ function getFieldTypeName(inputType) {
         <span>{{ authorized ? '已授权' : '授权' }}</span>
         <span class="dot" :class="{ 'dot-active': authorized }"></span>
       </button>
-      <button class="action-btn" :class="{ active: activeButton === 'recharge' }" @click="activeButton = 'recharge'; openRechargeDialog()" v-if="!quota.inviteActive">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-          <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48 2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48 2.83-2.83"/>
-        </svg>
-        <span>充值</span>
-      </button>
       <button class="action-btn" :class="{ active: activeButton === 'share' }" @click="activeButton = 'share'; openShareFormDialog()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
           <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M16 6l-4-4-4 4"/><path d="M12 2v13"/>
@@ -673,16 +662,25 @@ function getFieldTypeName(inputType) {
       </button>
     </div>
 
-    <!-- 额度信息 -->
+    <!-- 状态信息 -->
     <div class="quota-bar">
-      <div class="quota-info" v-if="quota.inviteActive">
+      <!-- 飞书订阅用户 -->
+      <div class="quota-info" v-if="feishuPayContext.hasQuota">
         <svg class="vip-icon" viewBox="0 0 24 24" fill="currentColor">
           <path d="M12 2L9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61z"/>
         </svg>
-        <span class="vip-text">VIP · {{ formatDate(quota.inviteExpireAt) }} 到期</span>
+        <span class="vip-text">已订阅 · 无限使用</span>
       </div>
+      <!-- 邀请码体验用户 -->
+      <div class="quota-info" v-else-if="quota.inviteActive">
+        <svg class="vip-icon" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 2L9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61z"/>
+        </svg>
+        <span class="vip-text">体验中 · {{ formatDate(quota.inviteExpireAt) }} 到期</span>
+      </div>
+      <!-- 免费用户 -->
       <div class="quota-info" v-else>
-        <span class="quota-label">剩余额度</span>
+        <span class="quota-label">免费次数</span>
         <span class="quota-count">{{ quota.remaining }}</span>
       </div>
     </div>

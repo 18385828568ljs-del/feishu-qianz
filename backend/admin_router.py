@@ -8,7 +8,10 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 from functools import wraps
 
+import io
+import csv
 from fastapi import APIRouter, Depends, HTTPException, Query, Header
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -55,10 +58,12 @@ router = APIRouter(
 
 # ==================== 认证 ====================
 
-def verify_admin(x_admin_token: str = Header(None)):
+def verify_admin(x_admin_token: str = Header(None), token: str = Query(None)):
     """验证管理员身份（简单密码认证）"""
     current_password = get_admin_password()
-    if x_admin_token != current_password:
+    # 同时支持从 Header (X-Admin-Token) 或 Query 参数 (token) 验证
+    actual_token = x_admin_token or token
+    if actual_token != current_password:
         raise HTTPException(status_code=401, detail="管理员认证失败")
     return True
 
@@ -324,6 +329,64 @@ def update_user_quota(
     return {"success": True, "remaining_quota": user.remaining_quota}
 
 
+@router.delete("/users/{user_id}", summary="删除用户")
+def delete_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_admin)
+):
+    """删除用户及其关联记录"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    
+    db.delete(user)
+    db.commit()
+    return {"success": True, "message": "用户已删除"}
+
+
+@router.get("/users/export", summary="导出用户 CSV")
+def export_users(
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_admin)
+):
+    users = db.query(User).all()
+    
+    try:
+        import openpyxl
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        raise HTTPException(status_code=500, detail="服务器未安装 openpyxl 库，无法导出 Excel。请联系管理员安装。")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "用户列表"
+    
+    headers = ["ID", "OpenID", "租户Key", "免费次数", "已使用", "邀请码", "VIP到期时间", "累计付费", "注册时间"]
+    ws.append(headers)
+    
+    for u in users:
+        ws.append([
+            u.id, u.open_id, u.tenant_key, u.remaining_quota, u.total_used, 
+            u.invite_code_used or "-",
+            u.invite_expire_at.isoformat() if u.invite_expire_at else "无",
+            u.total_paid / 100.0,
+            u.created_at.isoformat()
+        ])
+    
+    # 自动调整列宽
+    for i, _ in enumerate(headers, 1):
+        ws.column_dimensions[get_column_letter(i)].width = 20
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    
+    response = StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    response.headers["Content-Disposition"] = f"attachment; filename=users_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
+    return response
+
+
 # ==================== 表单管理 API ====================
 
 @router.get("/forms", summary="表单列表")
@@ -376,6 +439,23 @@ def update_form_status(
     db.commit()
     
     return {"success": True, "is_active": form.is_active}
+
+
+@router.delete("/forms/{form_id}", summary="删除表单")
+def delete_form(
+    form_id: str,
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_admin)
+):
+    """永久删除外部签名表单"""
+    form = db.query(SignForm).filter(SignForm.form_id == form_id).first()
+    if not form:
+        raise HTTPException(status_code=404, detail="表单不存在")
+    
+    db.delete(form)
+    db.commit()
+    
+    return {"success": True, "message": "表单已删除"}
 
 
 # ==================== 邀请码管理 API ====================
@@ -439,6 +519,64 @@ def create_invite(
         "code": code,
         "expires_at": expires_at.isoformat() if expires_at else None
     }
+
+
+@router.delete("/invites/{invite_id}", summary="删除邀请码")
+def delete_invite(
+    invite_id: int,
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_admin)
+):
+    """删除邀请码"""
+    invite = db.query(InviteCode).filter(InviteCode.id == invite_id).first()
+    if not invite:
+        raise HTTPException(status_code=404, detail="邀请码不存在")
+    
+    db.delete(invite)
+    db.commit()
+    return {"success": True, "message": "邀请码已删除"}
+
+
+@router.get("/invites/export", summary="导出邀请码 CSV")
+def export_invites(
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_admin)
+):
+    """导出所有邀请码为 CSV"""
+    invites = db.query(InviteCode).all()
+    
+    try:
+        import openpyxl
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        raise HTTPException(status_code=500, detail="服务器未安装 openpyxl 库，无法导出 Excel。请联系管理员安装。")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "邀请码列表"
+    
+    headers = ["ID", "邀请码", "最大使用", "已使用", "权益天数", "领取截止日期", "状态", "创建人", "创建时间"]
+    ws.append(headers)
+    
+    for i in invites:
+        ws.append([
+            i.id, i.code, i.max_usage, i.used_count, i.benefit_days,
+            i.expires_at.isoformat() if i.expires_at else "永久",
+            "有效" if i.is_active else "禁用",
+            i.created_by,
+            i.created_at.isoformat()
+        ])
+        
+    for idx, _ in enumerate(headers, 1):
+        ws.column_dimensions[get_column_letter(idx)].width = 15
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    
+    response = StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    response.headers["Content-Disposition"] = f"attachment; filename=invites_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
+    return response
 
 
 @router.put("/invites/{invite_id}/status", summary="更新邀请码状态")
@@ -529,6 +667,91 @@ def list_logs(
             "created_at": l.created_at.isoformat()
         } for l in logs]
     }
+
+
+@router.delete("/logs/clear", summary="清空日志")
+def clear_logs(
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_admin)
+):
+    """清空所有签名日志"""
+    db.query(SignatureLog).delete()
+    db.commit()
+    return {"success": True, "message": "所有日志已清空"}
+
+
+@router.delete("/logs/{log_id}", summary="删除单条日志")
+def delete_log(
+    log_id: int,
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_admin)
+):
+    """删除指定签名日志"""
+    log = db.query(SignatureLog).filter(SignatureLog.id == log_id).first()
+    if not log:
+        raise HTTPException(status_code=404, detail="日志不存在")
+    
+    db.delete(log)
+    db.commit()
+    return {"success": True, "message": "日志已删除"}
+
+
+@router.get("/logs/export", summary="导出日志 CSV")
+def export_logs(
+    user_key: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_admin)
+):
+    """按筛选条件导出日志为 CSV"""
+    query = db.query(SignatureLog)
+    
+    if user_key:
+        query = query.filter(SignatureLog.user_key.contains(user_key))
+    if start_date:
+        try:
+            start = datetime.fromisoformat(start_date)
+            query = query.filter(SignatureLog.created_at >= start)
+        except: pass
+    if end_date:
+        try:
+            end = datetime.fromisoformat(end_date)
+            query = query.filter(SignatureLog.created_at <= end)
+        except: pass
+        
+    logs = query.order_by(desc(SignatureLog.created_at)).all()
+    
+    try:
+        import openpyxl
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        raise HTTPException(status_code=500, detail="服务器未安装 openpyxl 库，无法导出 Excel。请联系管理员安装。")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "签名日志"
+    
+    headers = ["ID", "用户Key", "文件名", "文件Token", "配额消耗", "签名时间"]
+    ws.append(headers)
+    
+    for l in logs:
+        ws.append([
+            l.id, l.user_key, l.file_name, l.file_token,
+            "是" if l.quota_consumed else "否",
+            l.created_at.isoformat()
+        ])
+        
+    for idx, _ in enumerate(headers, 1):
+        ws.column_dimensions[get_column_letter(idx)].width = 20
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    
+    response = StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    response.headers["Content-Disposition"] = f"attachment; filename=logs_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
+    return response
 
 
 # ==================== 订单管理 API ====================

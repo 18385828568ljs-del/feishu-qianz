@@ -63,4 +63,4 @@ frontend/vue-template/.env.local
 !.env.example
 
 # 后台管理前端（不公开）
-frontend/admin/
+frontend/admin

@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from database import User, InviteCode, Order, SignatureLog, PricingPlan
 
 # 免费试用次数
-FREE_TRIAL_QUOTA = 20
+FREE_TRIAL_QUOTA = 10
 
 # 默认定价方案（数据库为空时自动初始化）
 DEFAULT_PRICING_PLANS = [

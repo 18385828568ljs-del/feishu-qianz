@@ -74,28 +74,19 @@ except ImportError as e:
     logger.warning(f"Custom exception handlers not available: {e}")
 
 # 导入并注册配额路由
-try:
-    from quota_router import router as quota_router
-    app.include_router(quota_router)
-    logger.info("Quota router registered successfully")
-except ImportError as e:
-    logger.warning(f"Quota router not available: {e}")
+from quota_router import router as quota_router
+app.include_router(quota_router)
+logger.info("Quota router registered successfully")
 
 # 导入并注册表单路由
-try:
-    from form_router import router as form_router
-    app.include_router(form_router)
-    logger.info("Form router registered successfully")
-except ImportError as e:
-    logger.warning(f"Form router not available: {e}")
+from form_router import router as form_router
+app.include_router(form_router)
+logger.info("Form router registered successfully")
 
 # 导入并注册管理后台路由
-try:
-    from admin_router import router as admin_router
-    app.include_router(admin_router)
-    logger.info("Admin router registered successfully")
-except ImportError as e:
-    logger.warning(f"Admin router not available: {e}")
+from admin_router import router as admin_router
+app.include_router(admin_router)
+logger.info("Admin router registered successfully")
 
 # 支付功能说明：已迁移到飞书官方付费能力
 # 旧的第三方支付路由(payment_router.py)已废弃删除
