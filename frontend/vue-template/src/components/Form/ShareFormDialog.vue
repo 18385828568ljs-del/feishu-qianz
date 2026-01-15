@@ -3,9 +3,10 @@
   包含表单基本信息输入和字段选择
 -->
 <script setup>
-import { defineProps, defineEmits, watch } from 'vue'
+import { defineProps, defineEmits, watch, ref, computed } from 'vue'
 import { ElDialog, ElInput, ElButton } from 'element-plus'
 import { useShareForm } from '@/composables/useShareForm'
+import { getRecordCount } from '@/services/api'
 
 const props = defineProps({
   modelValue: {
@@ -40,6 +41,7 @@ const {
   selectedFields,
   loadingFields,
   showFieldSelector,
+  selectedRecordIndex,
   loadTableFields,
   toggleFieldSelection,
   isFieldSelected,
@@ -52,14 +54,76 @@ const {
   resetShareForm
 } = useShareForm()
 
+// 记录数量
+const recordCount = ref(0)
+const loadingRecordCount = ref(false)
+
+// 动态生成记录条选项
+const recordOptions = computed(() => {
+  const count = recordCount.value || 0
+  return Array.from({ length: count }, (_, i) => ({
+    value: i + 1,
+    label: `记录条${i + 1}`
+  }))
+})
+
+// 自定义下拉框状态
+const isDropdownOpen = ref(false)
+
+// 切换下拉框
+function toggleDropdown() {
+  if (loadingRecordCount.value || recordOptions.value.length === 0) return
+  isDropdownOpen.value = !isDropdownOpen.value
+}
+
+// 选择记录
+function selectRecord(value) {
+  selectedRecordIndex.value = value
+  isDropdownOpen.value = false
+}
+
+// 获取当前选中的标签
+function getSelectedLabel() {
+  const option = recordOptions.value.find(opt => opt.value === selectedRecordIndex.value)
+  return option ? option.label : ''
+}
+
 // 显示 Toast
 function showToast(message, type) {
   emit('toast', { message, type })
 }
 
+// 加载记录数量
+async function loadRecordCount() {
+  if (!props.appToken || !props.tableId) {
+    return
+  }
+  
+  try {
+    loadingRecordCount.value = true
+    const result = await getRecordCount(props.appToken, props.tableId, props.sessionId)
+    if (result.success && result.count !== undefined) {
+      recordCount.value = result.count
+      // 如果当前选择的记录索引超出范围，重置为1
+      if (selectedRecordIndex.value > result.count || selectedRecordIndex.value < 1) {
+        selectedRecordIndex.value = 1
+      }
+    }
+  } catch (e) {
+    console.error('加载记录数量失败:', e)
+    // 失败时使用默认值，不显示错误提示，避免干扰用户体验
+    recordCount.value = 0
+  } finally {
+    loadingRecordCount.value = false
+  }
+}
+
 // 加载字段
 async function loadFields() {
-  await loadTableFields(props.appToken, props.tableId, props.sessionId, showToast)
+  await Promise.all([
+    loadTableFields(props.appToken, props.tableId, props.sessionId, showToast),
+    loadRecordCount()
+  ])
 }
 
 // 进入字段选择
@@ -92,6 +156,7 @@ function handleClose() {
   // 延迟重置，避免动画问题
   setTimeout(() => {
     resetShareForm()
+    recordCount.value = 0
   }, 300)
 }
 
@@ -102,6 +167,16 @@ watch(() => props.modelValue, (newVal) => {
     loadFields()
   }
 })
+
+// 监听 recordOptions 变化，确保选中值在有效范围内
+watch(recordOptions, (newOptions) => {
+  if (newOptions.length > 0 && selectedRecordIndex.value) {
+    // 确保 selectedRecordIndex 在有效范围内
+    if (selectedRecordIndex.value < 1 || selectedRecordIndex.value > newOptions.length) {
+      selectedRecordIndex.value = 1
+    }
+  }
+}, { immediate: true })
 </script>
 
 <template>
@@ -154,6 +229,45 @@ watch(() => props.modelValue, (newVal) => {
       <!-- 步骤2：字段选择 -->
       <div v-else class="field-selector">
         <p class="dialog-subtitle">点击选择要包含在表单中的字段</p>
+        
+        <!-- 记录条选择 - 自定义下拉框 -->
+        <div class="record-section">
+          <div class="section-header">
+            <span class="section-title">选择要关联的记录</span>
+            <span class="section-desc" v-if="recordOptions.length > 0">共 {{ recordOptions.length }} 条记录可用</span>
+          </div>
+          
+          <!-- 自定义 Select 组件 -->
+          <div class="custom-select" :class="{ 'is-open': isDropdownOpen, 'is-disabled': loadingRecordCount || recordOptions.length === 0 }">
+            <div class="custom-select-trigger" @click="toggleDropdown">
+              <span class="custom-select-value" v-if="selectedRecordIndex && getSelectedLabel()">
+                {{ getSelectedLabel() }}
+              </span>
+              <span class="custom-select-placeholder" v-else>
+                {{ loadingRecordCount ? '加载中...' : recordOptions.length === 0 ? '暂无记录' : '请选择记录' }}
+              </span>
+              <svg class="custom-select-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="6 9 12 15 18 9"/>
+              </svg>
+            </div>
+            
+            <!-- 下拉菜单 -->
+            <div class="custom-select-dropdown" v-show="isDropdownOpen">
+              <div 
+                v-for="option in recordOptions" 
+                :key="option.value"
+                class="custom-select-option"
+                :class="{ 'is-selected': selectedRecordIndex === option.value }"
+                @click="selectRecord(option.value)"
+              >
+                {{ option.label }}
+                <svg v-if="selectedRecordIndex === option.value" class="check-icon" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                </svg>
+              </div>
+            </div>
+          </div>
+        </div>
         
         <!-- 加载中 -->
         <div v-if="loadingFields" class="loading-fields">
@@ -558,4 +672,131 @@ watch(() => props.modelValue, (newVal) => {
   font-size: 15px;
   font-weight: 500;
 }
+
+/* 记录条选择段落 */
+.record-section {
+  margin-bottom: 24px;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+
+.section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1d1d1f;
+}
+
+.section-desc {
+  font-size: 12px;
+  color: #86868b;
+}
+
+/* 自定义 Select 组件 */
+.custom-select {
+  position: relative;
+  width: 100%;
+}
+
+.custom-select.is-disabled {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.custom-select-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 44px;
+  padding: 0 16px;
+  background: #fff;
+  border: 2px solid #e5e5ea;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.custom-select-trigger:hover {
+  border-color: #c7c7cc;
+}
+
+.custom-select.is-open .custom-select-trigger {
+  border-color: #3370ff;
+  box-shadow: 0 0 0 4px rgba(51, 112, 255, 0.1);
+}
+
+.custom-select-value {
+  font-size: 15px;
+  font-weight: 500;
+  color: #1d1d1f;
+  line-height: 1.4;
+}
+
+.custom-select-placeholder {
+  font-size: 15px;
+  color: #86868b;
+  line-height: 1.4;
+}
+
+.custom-select-arrow {
+  width: 18px;
+  height: 18px;
+  color: #86868b;
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
+}
+
+.custom-select.is-open .custom-select-arrow {
+  transform: rotate(180deg);
+}
+
+/* 下拉菜单 */
+.custom-select-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  background: #fff;
+  border: 1px solid #e5e5ea;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+  max-height: 260px;
+  overflow-y: auto;
+  z-index: 1000;
+  padding: 6px;
+}
+
+.custom-select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  font-size: 15px;
+  color: #1d1d1f;
+  line-height: 1.4;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.custom-select-option:hover {
+  background: #f5f5f7;
+}
+
+.custom-select-option.is-selected {
+  background: #f0f7ff;
+  color: #3370ff;
+  font-weight: 600;
+}
+
+.custom-select-option .check-icon {
+  width: 18px;
+  height: 18px;
+  color: #3370ff;
+}
+
 </style>

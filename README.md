@@ -15,7 +15,7 @@
 |------|------|
 | 前端 | Vue 3 + Vite + Element Plus |
 | 后端 | Python + FastAPI |
-| 数据库 | MySQL + Redis |
+| 数据库 | MySQL（Redis 可选） |
 | 部署 | Nginx 反向代理 |
 
 ## 📁 项目结构

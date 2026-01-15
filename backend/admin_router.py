@@ -111,6 +111,8 @@ class DashboardStats(BaseModel):
     total_form_submissions: int
     total_invites: int
     active_invites: int
+    total_income: int  # 总收入（分）
+    income_today: int  # 今日收入（分）
 
 
 class UserItem(BaseModel):
@@ -196,6 +198,13 @@ def get_dashboard(db: Session = Depends(get_db), _: bool = Depends(verify_admin)
     total_invites = db.query(InviteCode).count()
     active_invites = db.query(InviteCode).filter(InviteCode.is_active == True).count()
     
+    # 收入统计（只统计已支付的订单）
+    total_income = db.query(func.sum(Order.amount)).filter(Order.status == "paid").scalar() or 0
+    income_today = db.query(func.sum(Order.amount)).filter(
+        Order.status == "paid",
+        Order.paid_at >= today
+    ).scalar() or 0
+    
     return DashboardStats(
         total_users=total_users,
         new_users_today=new_users_today,
@@ -204,7 +213,9 @@ def get_dashboard(db: Session = Depends(get_db), _: bool = Depends(verify_admin)
         active_forms=active_forms,
         total_form_submissions=total_form_submissions,
         total_invites=total_invites,
-        active_invites=active_invites
+        active_invites=active_invites,
+        total_income=total_income,
+        income_today=income_today
     )
 
 
@@ -343,6 +354,42 @@ def delete_user(
     db.delete(user)
     db.commit()
     return {"success": True, "message": "用户已删除"}
+
+
+@router.delete("/users/{user_id}/invite", summary="清理用户邀请码记录")
+def clear_user_invite(
+    user_id: int,
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_admin)
+):
+    """清理用户的邀请码使用记录"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    
+    if not user.invite_code_used:
+        return {"success": True, "message": "用户未使用过邀请码", "invite_code": None}
+    
+    # 记录使用的邀请码
+    invite_code_str = user.invite_code_used
+    
+    # 清除用户的邀请码记录
+    user.invite_code_used = None
+    user.invite_expire_at = None
+    
+    # 减少邀请码的使用计数
+    invite = db.query(InviteCode).filter(InviteCode.code == invite_code_str).first()
+    if invite and invite.used_count > 0:
+        invite.used_count -= 1
+    
+    db.commit()
+    
+    return {
+        "success": True,
+        "message": "邀请码记录已清理",
+        "invite_code": invite_code_str,
+        "used_count_decreased": invite.used_count if invite else None
+    }
 
 
 @router.get("/users/export", summary="导出用户 CSV")

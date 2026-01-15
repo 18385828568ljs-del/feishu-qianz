@@ -83,8 +83,17 @@ export async function redeemInvite(code, openId, tenantKey) {
 
 // 获取定价方案
 export async function getPricingPlans() {
-  const { data } = await api.get('/api/payment/plans')
-  return data.plans
+  const { data } = await api.get('/api/pricing/plans')
+  console.log('API返回的完整数据:', data)
+  // 确保返回数组格式
+  if (data && data.plans) {
+    return Array.isArray(data.plans) ? data.plans : []
+  }
+  // 如果返回格式不对，尝试直接返回data（可能是数组）
+  if (Array.isArray(data)) {
+    return data
+  }
+  return []
 }
 
 // 创建支付订单
@@ -120,6 +129,14 @@ export async function getShareFormList(createdBy) {
 // 获取多维表格字段列表
 export async function getTableFields(appToken, tableId, sessionId) {
   const { data } = await api.get('/api/form/table-fields', {
+    params: { app_token: appToken, table_id: tableId, session_id: sessionId }
+  })
+  return data
+}
+
+// 获取多维表格记录数量
+export async function getRecordCount(appToken, tableId, sessionId) {
+  const { data } = await api.get('/api/form/record-count', {
     params: { app_token: appToken, table_id: tableId, session_id: sessionId }
   })
   return data

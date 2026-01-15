@@ -171,8 +171,30 @@ class SignForm(Base):
     is_active = Column(Boolean, default=True, nullable=False)
     expires_at = Column(DateTime, nullable=True)  # 过期时间（可选）
     
+    # 记录条索引
+    record_index = Column(Integer, default=1, nullable=False)  # 记录条索引，默认为1（记录条1）
+    
     # 提交统计
     submit_count = Column(Integer, default=0, nullable=False)
+    
+    # 时间戳
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class OAuthSession(Base):
+    """OAuth Session 存储表（替代 Redis）"""
+    __tablename__ = "oauth_sessions"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String(128), unique=True, nullable=False, index=True)  # 会话ID
+    
+    # Session 数据（JSON格式存储）
+    # 包含: access_token, refresh_token, expires_at, user 等信息
+    session_data = Column(Text, nullable=False)
+    
+    # 过期时间
+    expires_at = Column(DateTime, nullable=False, index=True)
     
     # 时间戳
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

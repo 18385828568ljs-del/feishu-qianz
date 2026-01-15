@@ -21,6 +21,17 @@ const emit = defineEmits(['update:modelValue', 'close', 'success'])
 
 const inviteCode = ref('')
 
+// 获取邀请码错误消息
+function getInviteErrorMessage(errorCode) {
+  const errorMessages = {
+    'INVALID_CODE': '邀请码不存在或无效',
+    'CODE_EXPIRED': '邀请码已过期',
+    'CODE_USED_UP': '邀请码使用次数已用完',
+    'ALREADY_USED_INVITE': '您已经使用过邀请码，每个用户只能使用一次'
+  }
+  return errorMessages[errorCode] || '邀请码无效或已被使用'
+}
+
 async function handleRedeem() {
   if (!inviteCode.value.trim()) {
     emit('toast', { message: '请输入邀请码', type: 'warning' })
@@ -39,7 +50,9 @@ async function handleRedeem() {
       inviteCode.value = ''
     }
   } catch (e) {
-    emit('toast', { message: '邀请码无效或已被使用', type: 'error' })
+    const errorCode = e.response?.data?.detail || e.message
+    const errorMessage = getInviteErrorMessage(errorCode)
+    emit('toast', { message: errorMessage, type: 'error' })
   }
 }
 

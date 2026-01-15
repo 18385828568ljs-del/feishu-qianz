@@ -93,6 +93,29 @@ logger.info("Admin router registered successfully")
 # 现在使用飞书多维表格插件的官方付费功能，无需后端支付API
 logger.info("Payment router registered successfully")
 
+# 导入数据库初始化函数
+from database import init_db
+
+@app.on_event("startup")
+async def startup_event():
+    """应用启动时自动初始化数据库表"""
+    try:
+        init_db()
+        logger.info("Database tables initialized successfully")
+        
+        # 执行数据库迁移（添加 record_index 字段）
+        try:
+            from migrations.add_record_index import migrate
+            migrate()
+        except ImportError:
+            # 如果迁移脚本不存在，跳过（不影响启动）
+            pass
+        except Exception as e:
+            logger.warning(f"Database migration warning: {e}")
+    except Exception as e:
+        logger.error(f"Failed to initialize database tables: {e}")
+        # 不抛出异常，允许应用继续启动（表可能已存在）
+
 
 # CORS 配置
 # 生产环境应设置 CORS_ORIGINS 环境变量，如 "https://example.com,https://app.example.com"
@@ -107,6 +130,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+
 # 导入数据库模块（用于配额检查）
 try:
     from database import get_db
@@ -117,11 +142,11 @@ except ImportError as e:
     DB_AVAILABLE = False
     logger.warning(f"Database module not available: {e}, using fallback mode")
 
-# user oauth tokens (使用 Redis 存储，支持多实例部署)
-# 如果 Redis 不可用，会自动回退到内存存储
+# user oauth tokens (使用 MySQL/Redis 存储，支持多实例部署)
+# 优先级：Redis（如果配置） -> MySQL -> 内存存储
 try:
     from session_store import USER_TOKENS
-    logger.info("Using Redis for session storage")
+    logger.info("Session storage module loaded")
 except ImportError:
     USER_TOKENS = {}
     logger.warning("session_store not available, using in-memory storage")
@@ -193,40 +218,109 @@ def get_user_root_folder_token(access_token: str) -> Optional[str]:
 
 
 # ===== OAuth for user_access_token (for personal/shared folders) =====
+# 根据飞书官方文档：https://open.feishu.cn/document/ukTMukTMukTM/ukzN4UjL5EDO14SOkTNx
+
+def get_redirect_uri(request: Request) -> str:
+    """
+    根据请求动态构建 redirect_uri。
+    本地开发时使用实际请求的 host 和 port，生产环境使用 BACKEND_BASE。
+    """
+    request_host = request.url.hostname
+    request_port = request.url.port
+    request_scheme = request.url.scheme
+    
+    # 判断是否为本地开发环境
+    is_local = request_host in ["localhost", "127.0.0.1"] or (
+        request_port and request_port in [8000, 3000, 5000, 8080]
+    )
+    
+    if is_local:
+        # 本地开发：使用实际请求的 host 和 port
+        if request_port:
+            return f"{request_scheme}://{request_host}:{request_port}/auth/callback"
+        else:
+            return f"{request_scheme}://{request_host}/auth/callback"
+    else:
+        # 生产环境：使用 BACKEND_BASE 环境变量
+        return f"{BACKEND_BASE}/auth/callback"
 
 @app.get("/auth/start", tags=["授权"], summary="启动 OAuth 授权")
-def auth_start():
+def auth_start(request: Request):
     """
     启动飞书 OAuth 授权流程。
     
+    根据飞书官方文档，使用 authen/v1/index 接口启动授权。
     返回飞书授权页面 URL，前端需要跳转到该 URL 进行用户授权。
+    
+    参考文档：https://open.feishu.cn/document/ukTMukTMukTM/ukzN4UjL5EDO14SOkTNx
     """
+    if not APP_ID or not APP_SECRET:
+        logger.error("❌ APP_ID or APP_SECRET not configured")
+        return JSONResponse({"error": "APP_ID or APP_SECRET not configured"}, status_code=500)
+    
     state = str(uuid.uuid4())
-    # We use our backend to handle callback
-    redirect_uri = f"{BACKEND_BASE}/auth/callback"
-    # 根据飞书官方文档，需要请求云盘相关权限
+    
+    # 根据请求动态构建 redirect_uri（本地开发时自动检测，生产环境使用 BACKEND_BASE）
+    redirect_uri = get_redirect_uri(request)
+    
+    # 根据飞书官方文档，需要请求云盘和多维表格相关权限
     # scope 参数用于指定需要申请的权限范围
-    # drive:drive:readonly 或 drive:drive 表示云盘权限
+    # drive:drive 表示云盘权限
+    # bitable:app 表示多维表格应用权限（读写）
+    # 参考：https://open.feishu.cn/document/ukTMukTMukTM/uYjL14iN2EjL2YTN
     url = (
         "https://open.feishu.cn/open-apis/authen/v1/index"
         f"?app_id={APP_ID}&redirect_uri={requests.utils.quote(redirect_uri)}&state={state}"
-        # 添加权限范围，确保可以访问云盘
-        "&scope=drive:drive"
+        # 添加权限范围：云盘权限 + 多维表格权限
+        "&scope=drive:drive bitable:app"
     )
-    logger.info(f"Auth start: redirect_uri={redirect_uri}, scope=drive:drive")
-    return JSONResponse({"auth_url": url, "state": state})
+    logger.info(f"Auth start: redirect_uri={redirect_uri}")
+    return JSONResponse({"auth_url": url, "state": state, "redirect_uri": redirect_uri})
 
 
 @app.get("/auth/callback", tags=["授权"], summary="OAuth 回调")
-def auth_callback(code: Optional[str] = None, state: Optional[str] = None):
+def auth_callback(request: Request, code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None, error_description: Optional[str] = None):
     """
     OAuth 授权回调端点，由飞书自动跳转。
     
-    交换 authorization_code 获取 access_token。
+    根据飞书官方文档，飞书会在用户授权后重定向到此端点，并携带 code 参数。
+    后端使用 code 交换 access_token。
+    
+    参考文档：https://open.feishu.cn/document/ukTMukTMukTM/ukzN4UjL5EDO14SOkTNx
+    
+    重要：此端点必须在飞书开放平台后台的「安全设置」->「重定向URL」中配置。
+    redirect_uri 必须与代码中的 BACKEND_BASE + /auth/callback 完全一致。
     """
+    # 检查是否有错误参数（飞书在授权失败时会返回 error 参数）
+    if error:
+        error_msg = f"飞书返回错误: {error}"
+        if error_description:
+            error_msg += f" - {error_description}"
+        logger.error(f"Auth callback error: {error}, description: {error_description}")
+        expected_redirect_uri = get_redirect_uri(request)
+        actual_backend_base = request.url.scheme + "://" + request.url.hostname + (f":{request.url.port}" if request.url.port else "")
+        return JSONResponse({
+            "error": "authorization_failed",
+            "feishu_error": error,
+            "feishu_error_description": error_description,
+            "message": error_msg,
+            "expected_redirect_uri": expected_redirect_uri,
+            "help_url": f"{actual_backend_base}/auth/diagnose"
+        }, status_code=400)
+    
     if not code:
-        return JSONResponse({"error": "missing code"}, status_code=400)
-    # exchange code for user_access_token
+        logger.error(f"Auth callback: Missing code parameter")
+        expected_redirect_uri = get_redirect_uri(request)
+        actual_backend_base = request.url.scheme + "://" + request.url.hostname + (f":{request.url.port}" if request.url.port else "")
+        return JSONResponse({
+            "error": "missing code",
+            "message": "授权失败：未收到授权码",
+            "expected_redirect_uri": expected_redirect_uri,
+            "help_url": f"{actual_backend_base}/auth/diagnose"
+        }, status_code=400)
+    
+    # 根据飞书官方文档，使用 authorization_code 交换 access_token
+    # 参考：https://open.feishu.cn/document/ukTMukTMukTM/ukzN4UjL5EDO14SOkTNx
     token_url = "https://open.feishu.cn/open-apis/authen/v1/access_token"
     resp = requests.post(token_url, json={
         "grant_type": "authorization_code",
@@ -236,11 +330,18 @@ def auth_callback(code: Optional[str] = None, state: Optional[str] = None):
     }, timeout=15)
     try:
         data = resp.json()
-    except Exception:
-        return JSONResponse({"error": "invalid token response", "body": resp.text[:500]}, status_code=500)
+    except Exception as e:
+        logger.error(f"Failed to parse token response: {e}")
+        return JSONResponse({"error": "invalid token response"}, status_code=500)
 
     if data.get("code") != 0:
-        return JSONResponse({"error": "token exchange failed", "resp": data}, status_code=500)
+        error_msg = data.get("msg", "unknown error")
+        logger.error(f"Token exchange failed: code={data.get('code')}, msg={error_msg}")
+        return JSONResponse({
+            "error": "token exchange failed", 
+            "feishu_code": data.get("code"),
+            "feishu_msg": error_msg
+        }, status_code=500)
 
     d = data.get("data", {})
     access_token = d.get("access_token")
@@ -253,12 +354,18 @@ def auth_callback(code: Optional[str] = None, state: Optional[str] = None):
 
     # store by generated session id
     session_id = str(uuid.uuid4())
-    USER_TOKENS[session_id] = {
+    token_data = {
         "access_token": access_token,
         "refresh_token": refresh_token,
         "expires_at": int(time.time()) + int(expires_in),
         "user": user_info,
     }
+    
+    try:
+        USER_TOKENS[session_id] = token_data
+        logger.info(f"Auth callback success: session_id={session_id}, user={user_info.get('name', 'unknown')}")
+    except Exception as e:
+        logger.error(f"Auth callback: Failed to store session: {e}", exc_info=True)
     # show a very small page to close window
     html = f"""
     <html><head><meta charset="UTF-8"></head><body>
@@ -281,8 +388,94 @@ def auth_callback(code: Optional[str] = None, state: Optional[str] = None):
     </script>
     </body></html>
     """
-    logger.info(f"Auth callback success, session_id={session_id}, returning HTML page")
     return HTMLResponse(html)
+
+
+@app.get("/auth/diagnose", tags=["授权"], summary="诊断授权配置")
+def auth_diagnose(request: Request):
+    """
+    诊断端点，检查授权配置是否正确。
+    帮助排查回调未到达的问题。
+    """
+    # 根据请求动态构建 redirect_uri
+    redirect_uri = get_redirect_uri(request)
+    
+    # 判断是否为本地开发环境
+    request_host = request.url.hostname
+    request_port = request.url.port
+    request_scheme = request.url.scheme
+    is_local = request_host in ["localhost", "127.0.0.1"] or (
+        request_port and request_port in [8000, 3000, 5000, 8080]
+    )
+    
+    # 检查配置
+    is_localhost = is_local or (BACKEND_BASE and ("localhost" in BACKEND_BASE.lower() or "127.0.0.1" in BACKEND_BASE))
+    
+    # 计算实际使用的后端地址（用于显示）
+    if is_local:
+        actual_backend_base = f"{request_scheme}://{request_host}" + (f":{request_port}" if request_port else "")
+    else:
+        actual_backend_base = BACKEND_BASE
+    
+    checks = {
+        "backend_base": {
+            "value": actual_backend_base,
+            "status": "ok",  # 本地测试时也是正常状态
+            "message": f"实际使用的后端地址: {actual_backend_base}" + ("（本地开发模式，自动检测）" if is_local else f"（生产环境，来自 BACKEND_BASE={BACKEND_BASE}）")
+        },
+        "app_id": {
+            "value": APP_ID if APP_ID else "未配置",
+            "status": "ok" if APP_ID else "error",
+            "message": "APP_ID 已配置" if APP_ID else "APP_ID 未配置"
+        },
+        "app_secret": {
+            "value": "已配置" if APP_SECRET else "未配置",
+            "status": "ok" if APP_SECRET else "error",
+            "message": "APP_SECRET 已配置" if APP_SECRET else "APP_SECRET 未配置"
+        },
+        "redirect_uri": {
+            "value": redirect_uri,
+            "status": "ok",
+            "message": "当前使用的回调地址"
+        }
+    }
+    
+    # 生成检查清单（根据飞书官方文档）
+    checklist = [
+        "✅ 检查飞书开放平台后台配置（参考：https://open.feishu.cn/document/ukTMukTMukTM/ukzN4UjL5EDO14SOkTNx）：",
+        f"   1. 登录 https://open.feishu.cn/app",
+        f"   2. 进入你的应用（APP_ID: {APP_ID}）",
+        f"   3. 找到「安全设置」->「重定向URL」",
+        f"   4. 确保添加了以下地址（必须完全一致，包括协议、域名、路径）：",
+        f"      {redirect_uri}",
+        "",
+        "⚠️  根据飞书官方文档，常见问题：",
+        "   - redirect_uri 必须与飞书后台配置的完全一致（包括协议 http/https、端口号）",
+        "   - 本地测试时，redirect_uri 必须包含端口号（如 http://localhost:8000/auth/callback）",
+        "   - 确保飞书后台的 redirect_uri 列表包含上述地址",
+        "   - 修改 redirect_uri 后，需要重新发布应用版本才能生效",
+        "",
+        "🔍 测试步骤：",
+        f"   1. 访问 {actual_backend_base}/auth/start 获取授权URL",
+        "   2. 在浏览器中打开授权URL并完成授权",
+        "   3. 检查后端日志确认授权成功",
+        "",
+        "📚 飞书官方文档：",
+        "   - OAuth 授权流程：https://open.feishu.cn/document/ukTMukTMukTM/ukzN4UjL5EDO14SOkTNx",
+        "   - 权限说明：https://open.feishu.cn/document/ukTMukTMukTM/uYjL14iN2EjL2YTN",
+    ]
+    
+    return JSONResponse({
+        "status": "diagnostic",
+        "checks": checks,
+        "checklist": checklist,
+        "current_request": {
+            "url": str(request.url),
+            "host": request.headers.get("host", "unknown"),
+            "scheme": request.url.scheme
+        },
+        "timestamp": time.time()
+    })
 
 
 from fastapi.responses import HTMLResponse
@@ -290,14 +483,35 @@ from fastapi.responses import HTMLResponse
 @app.get("/auth/status", tags=["授权"], summary="查询授权状态")
 def auth_status(session_id: Optional[str] = None):
     """查询用户授权状态，检查 session 是否有效。"""
-    if not session_id or session_id not in USER_TOKENS:
+    if not session_id:
         return {"authorized": False}
-    tok = USER_TOKENS[session_id]
-    return {
-        "authorized": True,
-        "expires_at": tok.get("expires_at"),
-        "user": tok.get("user"),
-    }
+    
+    try:
+        stored_data = USER_TOKENS.get(session_id)
+        if stored_data:
+            return {
+                "authorized": True,
+                "expires_at": stored_data.get("expires_at"),
+                "user": stored_data.get("user"),
+            }
+        
+        # 尝试从 session_store 直接查询
+        try:
+            from session_store import get_session
+            direct_data = get_session(session_id)
+            if direct_data:
+                return {
+                    "authorized": True,
+                    "expires_at": direct_data.get("expires_at"),
+                    "user": direct_data.get("user"),
+                }
+        except Exception:
+            pass
+        
+        return {"authorized": False}
+    except Exception as e:
+        logger.error(f"Auth status error: {e}", exc_info=True)
+        return {"authorized": False}
 
 
 # ===== Drive helper endpoints for frontend compatibility =====

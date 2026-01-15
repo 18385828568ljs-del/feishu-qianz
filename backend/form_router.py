@@ -68,6 +68,7 @@ class CreateFormRequest(BaseModel):
     extra_fields: Optional[List[FieldConfig]] = None  # 兼容旧版
     created_by: Optional[str] = None
     session_id: Optional[str] = None
+    record_index: Optional[int] = 1  # 记录条索引，默认为1
 
 
 class FormConfigResponse(BaseModel):
@@ -170,6 +171,77 @@ def create_bitable_record(app_token: str, table_id: str, fields: dict, access_to
         raise Exception(f"创建记录失败: {result}")
     
     return result["data"]["record"]["record_id"]
+
+
+def update_bitable_record(app_token: str, table_id: str, record_id: str, fields: dict, access_token: str) -> str:
+    """更新多维表格中的记录"""
+    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
+    
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+    
+    resp = requests.put(url, headers=headers, json={"fields": fields})
+    result = resp.json()
+    
+    if result.get("code") != 0:
+        raise Exception(f"更新记录失败: {result}")
+    
+    return result["data"]["record"]["record_id"]
+
+
+def get_bitable_records(app_token: str, table_id: str, access_token: str, page_size: int = 500) -> list:
+    """获取多维表格中的所有记录"""
+    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+    
+    headers = {
+        "Authorization": f"Bearer {access_token}"
+    }
+    
+    all_records = []
+    page_token = None
+    
+    while True:
+        params = {"page_size": page_size}
+        if page_token:
+            params["page_token"] = page_token
+        
+        resp = requests.get(url, headers=headers, params=params)
+        result = resp.json()
+        
+        if result.get("code") != 0:
+            raise Exception(f"获取记录列表失败: {result}")
+        
+        data = result.get("data", {})
+        records = data.get("items", [])
+        all_records.extend(records)
+        
+        # 检查是否还有下一页
+        page_token = data.get("page_token")
+        if not page_token or not records:
+            break
+    
+    return all_records
+
+
+def get_bitable_record_by_index(app_token: str, table_id: str, record_index: int, access_token: str) -> Optional[str]:
+    """
+    根据记录条索引获取对应的记录ID
+    record_index: 1表示第一条记录，2表示第二条，以此类推
+    返回: 记录ID，如果不存在则返回None
+    """
+    try:
+        records = get_bitable_records(app_token, table_id, access_token)
+        
+        # record_index 从1开始，所以需要减1作为数组索引
+        if record_index > 0 and record_index <= len(records):
+            return records[record_index - 1].get("record_id")
+        
+        return None
+    except Exception as e:
+        log_to_file(f"[get_bitable_record_by_index] Error: {e}")
+        return None
 
 
 def get_table_fields(app_token: str, table_id: str, access_token: str) -> list:
@@ -283,6 +355,68 @@ def get_table_fields_api(app_token: str, table_id: str, session_id: Optional[str
         raise HTTPException(status_code=500, detail=f"获取字段列表失败: {str(e)}")
 
 
+@router.get("/record-count")
+def get_record_count_api(app_token: str, table_id: str, session_id: Optional[str] = None):
+    """获取多维表格的记录数量"""
+    try:
+        access_token = None
+        token_data = None
+        
+        print(f"[record-count] Getting record count for app_token={app_token}, table_id={table_id}")
+        
+        # 获取 session 中的 token
+        if session_id:
+            try:
+                from main import USER_TOKENS
+                token_data = USER_TOKENS.get(session_id)
+                if token_data:
+                    access_token = token_data.get("access_token")
+                    print(f"[record-count] Using user access_token from session")
+            except Exception as e:
+                print(f"[record-count] Failed to get session token: {e}")
+        
+        # 尝试获取记录列表
+        records = None
+        
+        # 第一次尝试：使用已有的 access_token
+        if access_token:
+            try:
+                records = get_bitable_records(app_token, table_id, access_token)
+                print(f"[record-count] Got {len(records)} records using user token")
+            except Exception as e:
+                print(f"[record-count] User token failed: {e}")
+                # token 可能过期，尝试刷新
+                if token_data and token_data.get("refresh_token"):
+                    try:
+                        from main import USER_TOKENS
+                        new_access, new_refresh = refresh_access_token(token_data.get("refresh_token"))
+                        access_token = new_access
+                        # 更新存储
+                        USER_TOKENS[session_id]["access_token"] = new_access
+                        USER_TOKENS[session_id]["refresh_token"] = new_refresh
+                        records = get_bitable_records(app_token, table_id, access_token)
+                        print(f"[record-count] Got {len(records)} records using refreshed token")
+                    except Exception as refresh_e:
+                        print(f"[record-count] Refresh token failed: {refresh_e}")
+        
+        # 回退到应用 token
+        if records is None:
+            print(f"[record-count] Falling back to app token")
+            try:
+                access_token = get_app_access_token()
+                print(f"[record-count] Got app_access_token")
+                records = get_bitable_records(app_token, table_id, access_token)
+                print(f"[record-count] Got {len(records)} records using app token")
+            except Exception as app_e:
+                print(f"[record-count] App token also failed: {app_e}")
+                raise app_e
+        
+        return {"success": True, "count": len(records)}
+    
+    except Exception as e:
+        print(f"[record-count] ERROR: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取记录数量失败: {str(e)}")
+
 
 @router.post("/create")
 def create_form(req: CreateFormRequest, db: Session = Depends(get_db)):
@@ -320,7 +454,8 @@ def create_form(req: CreateFormRequest, db: Session = Depends(get_db)):
         signature_field_id=req.signature_field_id,
         extra_fields=extra_fields_json,
         created_by=req.created_by,
-        creator_refresh_token=creator_refresh_token  # 保存创建者的 refresh_token
+        creator_refresh_token=creator_refresh_token,  # 保存创建者的 refresh_token
+        record_index=req.record_index or 1  # 保存记录条索引，默认为1
     )
     
     db.add(form)
@@ -408,18 +543,34 @@ async def submit_form(
                 new_access_token, new_refresh_token = refresh_access_token(form.creator_refresh_token)
                 access_token = new_access_token
                 token_type = "user_token"
+                log_to_file(f"[Form Submit] Successfully refreshed user token")
                 
                 # 更新存储的 refresh_token
                 if new_refresh_token and new_refresh_token != form.creator_refresh_token:
                     form.creator_refresh_token = new_refresh_token
                     db.commit()
             except Exception as refresh_err:
+                error_msg = str(refresh_err)
+                log_to_file(f"[Form Submit] Refresh failed: {error_msg}")
                 print(f"[Form Submit] Refresh failed: {refresh_err}")
+                # 如果 refresh_token 无效或过期，提示前端需要重新授权，而不是静默改用 app_token
+                if "invalid" in error_msg.lower() or "expired" in error_msg.lower() or "401" in error_msg:
+                    log_to_file(f"[Form Submit] Refresh token invalid/expired, clearing it and requiring re-auth")
+                    form.creator_refresh_token = None
+                    db.commit()
+                    # 直接返回 401，让前端引导用户重新授权
+                    raise HTTPException(
+                        status_code=401,
+                        detail="授权已失效，请返回表单管理后台重新完成飞书授权后再提交。"
+                    )
                 access_token = None
         
         if not access_token:
+            log_to_file(f"[Form Submit] Falling back to app_token (user token unavailable)")
             access_token = get_app_access_token()
             token_type = "app_token"
+        
+        log_to_file(f"[Form Submit] Using token type: {token_type}")
         
         # 解析表单数据
         extra_data = json.loads(form_data)
@@ -509,13 +660,63 @@ async def submit_form(
                 # 文本、电话、邮箱、URL 等直接使用字符串
                 fields[field_name] = str(value)
         
-        # 创建多维表格记录
+        # 根据 record_index 决定是更新还是创建记录
+        record_id = None
+        record_index = form.record_index or 1
+        
+        # 如果 record_index > 0，尝试获取对应的记录ID
+        if record_index > 0:
+            try:
+                target_record_id = get_bitable_record_by_index(
+                    form.app_token, 
+                    form.table_id, 
+                    record_index, 
+                    access_token
+                )
+                if target_record_id:
+                    record_id = target_record_id
+                    log_to_file(f"[Form Submit] Found existing record at index {record_index}: {target_record_id}")
+            except Exception as e:
+                log_to_file(f"[Form Submit] Failed to get record by index {record_index}: {e}")
+                # 如果获取失败，继续创建新记录
+        
+        # 创建或更新多维表格记录
         try:
-            record_id = create_bitable_record(form.app_token, form.table_id, fields, access_token)
+            if record_id:
+                # 更新现有记录
+                log_to_file(f"[Form Submit] Updating record {record_id} at index {record_index} with token_type={token_type}, app_token={form.app_token[:8]}..., table_id={form.table_id[:8]}...")
+                record_id = update_bitable_record(form.app_token, form.table_id, record_id, fields, access_token)
+                log_to_file(f"[Form Submit] Record updated successfully: {record_id}")
+            else:
+                # 创建新记录
+                log_to_file(f"[Form Submit] Creating new record with token_type={token_type}, app_token={form.app_token[:8]}..., table_id={form.table_id[:8]}...")
+                record_id = create_bitable_record(form.app_token, form.table_id, fields, access_token)
+                log_to_file(f"[Form Submit] Record created successfully: {record_id}")
         except Exception as e:
             # 检查是否是字段未找到错误 (1254045: FieldNameNotFound)
             error_str = str(e)
-            print(f"[Form Submit] Create record failed: {error_str}")
+            operation = "更新" if record_id else "创建"
+            print(f"[Form Submit] {operation} record failed: {error_str}")
+            log_to_file(f"[Form Submit] {operation} record failed with token_type={token_type}: {error_str}")
+            
+            # 检查是否是权限错误 (91403: Forbidden)
+            if "91403" in error_str or "Forbidden" in error_str:
+                error_detail = f"权限不足 (91403 Forbidden)。"
+                if token_type == "app_token":
+                    error_detail += " 当前使用的是应用 token，缺少多维表格写入权限。"
+                    error_detail += " 请让表单创建者在后台重新完成飞书 OAuth 授权（需要 bitable:app 写入权限），"
+                    error_detail += " 然后重新创建或编辑该表单。"
+                elif token_type == "user_token":
+                    error_detail += " 当前用户 token 权限不足。"
+                    error_detail += " 请检查授权范围是否包含多维表格写入（bitable:app），"
+                    error_detail += " 或尝试重新授权后再提交。"
+                else:
+                    error_detail += " 未找到有效的用户 token，且应用 token 权限不足。"
+                    error_detail += " 请确保表单创建者已完成 OAuth 授权。"
+                
+                log_to_file(f"[Form Submit] Permission error: {error_detail}")
+                # 使用 403 返回给前端，而不是泛化为 500
+                raise HTTPException(status_code=403, detail=error_detail)
             
             if "1254045" in error_str or "FieldNameNotFound" in error_str:
                 print(f"[Form Submit] Field not found, attempting auto-repair for form {form_id}")
@@ -601,9 +802,12 @@ async def submit_form(
                         # 打印一下最终的 fields 键
                         print(f"[Form Submit] Retrying with fields keys: {list(fields.keys())}")
                         
-                        # 重试创建记录
+                        # 重试创建或更新记录
                         try:
-                            record_id = create_bitable_record(form.app_token, form.table_id, fields, access_token)
+                            if record_id:
+                                record_id = update_bitable_record(form.app_token, form.table_id, record_id, fields, access_token)
+                            else:
+                                record_id = create_bitable_record(form.app_token, form.table_id, fields, access_token)
                         except Exception as retry_err:
                             log_to_file(f"[Form Submit] Retry failed: {retry_err}")
                             raise retry_err
@@ -632,6 +836,9 @@ async def submit_form(
             "message": "签名提交成功"
         }
         
+    except HTTPException:
+        # 已经是带状态码的业务错误，直接抛出
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"提交失败: {str(e)}")
 

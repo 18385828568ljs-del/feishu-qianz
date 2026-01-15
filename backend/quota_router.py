@@ -2,7 +2,7 @@
 配额和支付相关的 API 路由
 """
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -192,8 +192,39 @@ def redeem_invite(req: InviteRedeemRequest, db: Session = Depends(get_db)):
 
 
 # ==================== 支付 API ====================
-# 注意：支付功能已迁移到飞书官方付费能力
-# 用户通过飞书插件详情页购买，无需后端支付接口
+
+@router.get("/pricing/plans", summary="获取套餐列表")
+def get_pricing_plans(db: Session = Depends(get_db)):
+    """获取所有上架的套餐列表（公开接口，不需要管理员权限）"""
+    plans = quota_service.get_pricing_plans(db)
+    return {"plans": plans}
+
+
+@router.post("/payment/create", summary="创建支付订单")
+def create_order(req: CreateOrderRequest, db: Session = Depends(get_db)):
+    """创建支付订单"""
+    result = quota_service.create_order(db, req.plan_id, req.open_id, req.tenant_key)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "CREATE_ORDER_FAILED"))
+    return result
+
+
+@router.post("/payment/mock-pay", summary="模拟支付（测试用）")
+def mock_pay(order_id: str = Query(..., description="订单ID"), db: Session = Depends(get_db)):
+    """模拟支付订单（测试用）"""
+    result = quota_service.mock_pay_order(db, order_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "PAY_FAILED"))
+    return result
+
+
+@router.get("/payment/status/{order_id}", summary="查询订单状态")
+def get_order_status(order_id: str, db: Session = Depends(get_db)):
+    """查询订单状态"""
+    result = quota_service.get_order_status(db, order_id)
+    if not result.get("found"):
+        raise HTTPException(status_code=404, detail="订单不存在")
+    return result
 
 
 

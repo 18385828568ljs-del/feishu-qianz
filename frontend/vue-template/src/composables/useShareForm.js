@@ -14,6 +14,7 @@ const selectedFields = ref([])
 const loadingFields = ref(false)
 const showFieldSelector = ref(false)
 const currentAppToken = ref('')
+const selectedRecordIndex = ref(1) // 记录条索引，默认选择记录条1
 
 /**
  * 加载多维表格字段列表
@@ -141,7 +142,8 @@ async function handleCreateShareForm({ tableId, userKey, sessionId }, showToast)
             signature_field_id: signatureField?.field_id || null,
             fields: selectedFields.value,
             created_by: userKey,
-            session_id: sessionId
+            session_id: sessionId,
+            record_index: selectedRecordIndex.value // 传递记录条索引
         })
 
         if (result.success) {
@@ -242,6 +244,7 @@ function resetShareForm() {
     generatedShareUrl.value = ''
     selectedFields.value = []
     showFieldSelector.value = false
+    selectedRecordIndex.value = 1 // 重置为记录条1
 }
 
 export function useShareForm() {
@@ -255,6 +258,7 @@ export function useShareForm() {
         loadingFields,
         showFieldSelector,
         currentAppToken,
+        selectedRecordIndex,
         // 方法
         loadTableFields,
         toggleFieldSelection,

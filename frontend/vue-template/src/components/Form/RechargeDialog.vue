@@ -1,56 +1,139 @@
 <!--
-  购买引导组件 - 飞书官方付费版本
-  引导用户前往飞书插件详情页购买
+  充值/购买套餐弹窗组件
+  展示套餐列表，支持选择套餐并完成支付
 -->
 <script setup>
-import { ref, defineProps, defineEmits } from 'vue'
-import { ElDialog, ElButton } from 'element-plus'
-import { bitable } from '@lark-base-open/js-sdk'
+import { ref, onMounted, watch, defineProps, defineEmits } from 'vue'
+import { ElDialog, ElButton, ElMessage } from 'element-plus'
+import { getPricingPlans, createOrder, mockPay } from '@/services/api'
 
 const props = defineProps({
   modelValue: {
     type: Boolean,
     default: false
+  },
+  userInfo: {
+    type: Object,
+    default: () => ({ openId: '', tenantKey: '' })
   }
 })
 
-const emit = defineEmits(['update:modelValue', 'close'])
+const emit = defineEmits(['update:modelValue', 'close', 'success', 'toast'])
 
-const isOpening = ref(false)
+// 状态
+const loading = ref(false)
+const plans = ref([])
+const selectedPlan = ref(null)
+const creatingOrder = ref(false)
+const paying = ref(false)
+
+// 加载套餐列表
+async function loadPlans() {
+  loading.value = true
+  try {
+    const data = await getPricingPlans()
+    console.log('获取到的套餐数据:', data)
+    plans.value = Array.isArray(data) ? data : []
+    console.log('设置后的套餐列表:', plans.value)
+    if (plans.value.length === 0) {
+      console.warn('套餐列表为空')
+    }
+  } catch (error) {
+    console.error('加载套餐列表失败:', error)
+    console.error('错误详情:', error.response?.data || error.message)
+    emit('toast', { message: '加载套餐列表失败，请稍后重试', type: 'error' })
+    plans.value = []
+  } finally {
+    loading.value = false
+  }
+}
 
 // 关闭弹窗
 function handleClose() {
   emit('update:modelValue', false)
   emit('close')
+  selectedPlan.value = null
 }
 
-// 跳转到插件详情页购买
-async function goToPurchase() {
-  isOpening.value = true
-  
+// 选择套餐
+function selectPlan(plan) {
+  selectedPlan.value = plan
+}
+
+// 格式化价格（分转元）
+function formatPrice(priceInCents) {
+  return (priceInCents / 100).toFixed(2)
+}
+
+// 购买套餐
+async function purchasePlan() {
+  if (!selectedPlan.value) {
+    emit('toast', { message: '请先选择套餐', type: 'warning' })
+    return
+  }
+
+  if (!props.userInfo.openId || !props.userInfo.tenantKey) {
+    emit('toast', { message: '用户信息不完整', type: 'error' })
+    return
+  }
+
+  creatingOrder.value = true
+  let orderId = null
+
   try {
-    // 方式1：尝试使用飞书JSAPI打开插件详情页
-    const { appId } = await bitable.bridge.getEnv()
-    
-    if (appId) {
-      // 使用飞书协议打开插件详情页
-      const detailUrl = `https://applink.feishu.cn/client/web_app/open?appId=${appId}`
-      window.open(detailUrl, '_blank')
-    } else {
-      // 降级方案：提示用户手动打开
-      alert('请在飞书应用商店搜索"签名助手"并购买')
+    // 创建订单
+    const orderResult = await createOrder(
+      selectedPlan.value.id,
+      props.userInfo.openId,
+      props.userInfo.tenantKey
+    )
+
+    if (!orderResult.success) {
+      throw new Error(orderResult.error || '创建订单失败')
     }
-    
-    // 关闭弹窗
+
+    orderId = orderResult.order_id
+
+    // 模拟支付
+    paying.value = true
+    const payResult = await mockPay(orderId)
+
+    if (!payResult.success) {
+      throw new Error(payResult.error || '支付失败')
+    }
+
+    // 支付成功
+    emit('toast', { 
+      message: `购买成功！已获得 ${selectedPlan.value.count} 次签名配额`, 
+      type: 'success' 
+    })
+    emit('success')
     handleClose()
   } catch (error) {
-    console.error('打开插件详情页失败:', error)
-    // 降级方案
-    alert('请在飞书应用商店中找到本插件并购买')
+    console.error('购买失败:', error)
+    emit('toast', { 
+      message: error.message || '购买失败，请稍后重试', 
+      type: 'error' 
+    })
   } finally {
-    isOpening.value = false
+    creatingOrder.value = false
+    paying.value = false
   }
 }
+
+// 弹窗打开时加载套餐列表
+onMounted(() => {
+  if (props.modelValue) {
+    loadPlans()
+  }
+})
+
+// 监听弹窗打开
+watch(() => props.modelValue, (newVal) => {
+  if (newVal) {
+    loadPlans()
+  }
+})
 </script>
 
 <template>
@@ -65,9 +148,7 @@ async function goToPurchase() {
   >
     <template #header>
       <div class="dialog-header">
-        <div class="header-left">
-           <!-- 占位，保持标题居中 -->
-        </div>
+        <div class="header-left"></div>
         <div class="dialog-title-text">购买签名配额</div>
         <button class="close-btn" @click="handleClose">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -78,85 +159,67 @@ async function goToPurchase() {
     </template>
     
     <div class="dialog-content">
-      <div class="purchase-guide">
-        <!-- 飞书图标 -->
-        <div class="feishu-icon">
-          <svg viewBox="0 0 48 48" fill="none">
-            <rect width="48" height="48" rx="12" fill="#00D6B9"/>
-            <path d="M24 12L16 20h6v8h4v-8h6l-8-8z" fill="white"/>
-            <path d="M14 32h20v2H14z" fill="white"/>
-          </svg>
-        </div>
-        
-        <!-- 提示文案 -->
-        <h3 class="guide-title">获取更多签名配额</h3>
-        <p class="guide-desc">
-          当前配额已用完或不足。<br/>
-          请前往<strong>飞书插件详情页</strong>选购套餐。
-        </p>
-        
-        <!-- 购买步骤 -->
-        <div class="steps">
-          <div class="step-item">
-            <div class="step-num">1</div>
-            <div class="step-text">点击下方"前往购买"按钮</div>
-          </div>
-          <div class="step-item">
-            <div class="step-num">2</div>
-            <div class="step-text">在插件详情页选择合适套餐</div>
-          </div>
-          <div class="step-item">
-            <div class="step-num">3</div>
-            <div class="step-text">支付成功后配额即时生效</div>
-          </div>
-        </div>
-        
-        <!-- 优势说明 -->
-        <div class="benefits">
-          <div class="benefit-item">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22Z"/>
-              <path d="M9 12L11 14L15 10"/>
-            </svg>
-            <span>官方安全</span>
-          </div>
-          <div class="benefit-item">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
-            </svg>
-            <span>即时到账</span>
-          </div>
-          <div class="benefit-item">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="10"/>
-              <path d="M12 6v6l4 2"/>
-            </svg>
-            <span>自动同步</span>
+      <!-- 加载状态 -->
+      <div v-if="loading" class="loading-container">
+        <div class="loading-spinner"></div>
+        <p>加载套餐中...</p>
+      </div>
+
+      <!-- 套餐列表 -->
+      <div v-else-if="plans.length > 0" class="plans-container">
+        <div class="plans-grid">
+          <div 
+            v-for="plan in plans" 
+            :key="plan.id"
+            class="plan-card"
+            :class="{ 'selected': selectedPlan?.id === plan.id }"
+            @click="selectPlan(plan)"
+          >
+            <div class="plan-header">
+              <h3 class="plan-name">{{ plan.name }}</h3>
+              <div v-if="selectedPlan?.id === plan.id" class="selected-badge">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M20 6L9 17l-5-5"/>
+                </svg>
+              </div>
+            </div>
+            <div class="plan-body">
+              <div class="plan-quota">
+                <span class="quota-number">{{ plan.count }}</span>
+                <span class="quota-unit">次签名</span>
+              </div>
+              <div class="plan-price">
+                <span class="price-symbol">¥</span>
+                <span class="price-amount">{{ formatPrice(plan.price) }}</span>
+              </div>
+              <div v-if="plan.description" class="plan-desc">
+                {{ plan.description }}
+              </div>
+            </div>
           </div>
         </div>
-        
-        <!-- 按钮 -->
-        <div class="actions">
+
+        <!-- 购买按钮 -->
+        <div class="purchase-actions">
           <el-button 
             type="primary" 
-            size="large" 
-            @click="goToPurchase"
-            :loading="isOpening"
+            size="large"
+            :disabled="!selectedPlan || creatingOrder || paying"
+            :loading="creatingOrder || paying"
+            @click="purchasePlan"
             class="purchase-btn"
           >
-            {{ isOpening ? '正在打开...' : '前往购买' }}
+            <span v-if="creatingOrder">创建订单中...</span>
+            <span v-else-if="paying">支付中...</span>
+            <span v-else-if="selectedPlan">立即购买 ¥{{ formatPrice(selectedPlan.price) }}</span>
+            <span v-else>请选择套餐</span>
           </el-button>
         </div>
-        
-        <!-- 底部提示 -->
-        <p class="bottom-note">
-          <svg class="info-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10"/>
-            <line x1="12" y1="16" x2="12" y2="12"/>
-            <line x1="12" y1="8" x2="12.01" y2="8"/>
-          </svg>
-          购买后返回插件即可继续使用
-        </p>
+      </div>
+
+      <!-- 无套餐提示 -->
+      <div v-else class="empty-container">
+        <p>暂无可用套餐</p>
       </div>
     </div>
   </el-dialog>
@@ -167,17 +230,16 @@ async function goToPurchase() {
 .dialog-header {
   display: flex;
   align-items: center;
-  justify-content: space-between; /* 两端对齐 */
+  justify-content: space-between;
   padding-bottom: 0;
   position: relative;
   height: 24px;
 }
 
 .header-left {
-    width: 28px; /* 占位，与右侧按钮平衡 */
+  width: 28px;
 }
 
-/* 自定义关闭按钮样式 */
 .close-btn {
   width: 28px;
   height: 28px;
@@ -194,12 +256,12 @@ async function goToPurchase() {
 }
 
 .close-btn svg {
-  width: 20px; /* 稍微大一点，更易点击 */
+  width: 20px;
   height: 20px;
 }
 
 .close-btn:hover {
-  background: rgba(31, 35, 41, 0.1); /* 飞书风格 hover */
+  background: rgba(31, 35, 41, 0.1);
   color: #1f2329;
 }
 
@@ -214,146 +276,187 @@ async function goToPurchase() {
 /* 弹窗内容 */
 .dialog-content {
   padding-top: 12px;
+  min-height: 200px;
 }
 
-.purchase-guide {
-  text-align: center;
+/* 加载状态 */
+.loading-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+  color: #646a73;
+}
+
+.loading-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid #f0f0f0;
+  border-top-color: #3370ff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-bottom: 12px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 套餐列表 */
+.plans-container {
   padding: 0 4px;
 }
 
-.feishu-icon {
-  width: 64px; /* 稍微缩小图标，更精致 */
-  height: 64px;
-  margin: 0 auto 16px;
+.plans-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
 }
 
-.feishu-icon svg {
-  width: 100%;
-  height: 100%;
-  filter: drop-shadow(0 4px 12px rgba(0, 214, 185, 0.2));
+.plan-card {
+  background: #fff;
+  border: 2px solid #f0f0f0;
+  border-radius: 12px;
+  padding: 16px;
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
 }
 
-.guide-title {
-  font-size: 20px;
+.plan-card:hover {
+  border-color: #3370ff;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(51, 112, 255, 0.15);
+}
+
+.plan-card.selected {
+  border-color: #3370ff;
+  background: #f7f9ff;
+  box-shadow: 0 4px 12px rgba(51, 112, 255, 0.2);
+}
+
+.plan-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.plan-name {
+  font-size: 15px;
   font-weight: 600;
   color: #1f2329;
-  margin-bottom: 8px;
+  margin: 0;
 }
 
-.guide-desc {
-  font-size: 14px;
-  color: #646a73;
-  line-height: 1.5;
-  margin-bottom: 24px;
-}
-
-.guide-desc strong {
-  color: #00D6B9;
-  font-weight: 600;
-}
-
-/* 购买步骤 - 优化布局 */
-.steps {
-  text-align: left;
-  margin: 0 auto 24px;
-  background: #f5f6f7;
-  padding: 16px;
-  border-radius: 8px;
-}
-
-.step-item {
-  display: flex;
-  align-items: start;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-
-.step-item:last-child {
-  margin-bottom: 0;
-}
-
-.step-num {
+.selected-badge {
   width: 20px;
   height: 20px;
-  border-radius: 50%;
   background: #3370ff;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  font-weight: 600;
-  flex-shrink: 0;
-  margin-top: 1px; /* 对齐文字 */
 }
 
-.step-text {
-  font-size: 14px;
-  color: #434343; /* 深色一点，增加易读性 */
-  line-height: 1.5;
+.selected-badge svg {
+  width: 12px;
+  height: 12px;
 }
 
-/* 优势说明 - 紧凑布局 */
-.benefits {
+.plan-body {
   display: flex;
-  justify-content: center;
-  gap: 16px;
-  margin-bottom: 24px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 8px;
 }
 
-.benefit-item {
+.plan-quota {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 4px;
+}
+
+.quota-number {
+  font-size: 24px;
+  font-weight: 700;
+  color: #1f2329;
+}
+
+.quota-unit {
+  font-size: 14px;
+  color: #646a73;
+}
+
+.plan-price {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  margin-top: 4px;
+}
+
+.price-symbol {
+  font-size: 14px;
+  color: #646a73;
+  font-weight: 500;
+}
+
+.price-amount {
+  font-size: 20px;
+  font-weight: 700;
+  color: #3370ff;
+}
+
+.plan-desc {
   font-size: 12px;
   color: #8f959e;
+  line-height: 1.4;
+  margin-top: 4px;
 }
 
-.benefit-item svg {
-  width: 16px;
-  height: 16px;
-  color: #34c759;
-}
-
-/* 按钮 */
-.actions {
-  margin-bottom: 12px;
+/* 购买按钮 */
+.purchase-actions {
+  padding: 0 4px;
 }
 
 .purchase-btn {
   width: 100%;
   height: 44px;
-  border-radius: 8px; /* 稍微圆角小一点，更商务 */
+  border-radius: 8px;
   font-size: 16px;
   font-weight: 500;
-  background: #3370ff; /* 飞书蓝 */
+  background: #3370ff;
   border: none;
   box-shadow: 0 2px 6px rgba(51, 112, 255, 0.2);
   transition: all 0.2s;
 }
 
-.purchase-btn:hover {
+.purchase-btn:hover:not(:disabled) {
   background: #295ed9;
   transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(51, 112, 255, 0.3);
 }
 
-.purchase-btn:active {
+.purchase-btn:active:not(:disabled) {
   transform: translateY(0);
 }
 
-/* 底部提示 */
-.bottom-note {
+.purchase-btn:disabled {
+  background: #e5e5e5;
+  color: #999;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* 空状态 */
+.empty-container {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  font-size: 12px;
-  color: #8f959e;
-}
-
-.info-icon {
-  width: 14px;
-  height: 14px;
+  padding: 40px 20px;
+  color: #646a73;
+  font-size: 14px;
 }
 </style>
