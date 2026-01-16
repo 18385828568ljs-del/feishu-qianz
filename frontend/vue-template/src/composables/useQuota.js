@@ -8,6 +8,8 @@ import { getQuota } from '@/services/api'
 // 响应式状态
 const quota = ref({
     remaining: 20,
+    planQuota: null,       // 套餐总配额（用于进度条）
+    isUnlimited: false,    // 是否不限次数
     totalUsed: 0,
     inviteActive: false,
     inviteExpireAt: null,
@@ -15,7 +17,7 @@ const quota = ref({
 
 // 计算属性：是否可以签名
 const canSign = computed(() => {
-    return quota.value.inviteActive || quota.value.remaining > 0
+    return quota.value.inviteActive || quota.value.isUnlimited || quota.value.remaining > 0
 })
 
 /**
@@ -28,6 +30,8 @@ async function loadQuota(openId, tenantKey) {
         const data = await getQuota(openId, tenantKey)
         quota.value = {
             remaining: data.remaining || 0,
+            planQuota: data.plan_quota || 10,  // 默认免费试用 10 次
+            isUnlimited: data.is_unlimited || false,
             totalUsed: data.total_used || 0,
             inviteActive: data.invite_active || false,
             inviteExpireAt: data.invite_expire_at || null,

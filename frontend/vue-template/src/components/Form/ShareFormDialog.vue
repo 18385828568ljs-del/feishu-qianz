@@ -61,10 +61,18 @@ const loadingRecordCount = ref(false)
 // 动态生成记录条选项
 const recordOptions = computed(() => {
   const count = recordCount.value || 0
-  return Array.from({ length: count }, (_, i) => ({
-    value: i + 1,
-    label: `记录条${i + 1}`
-  }))
+  // 添加“新增记录”选项（value=0表示创建新记录）
+  const options = [
+    { value: 0, label: '新增一条记录', isCreateNew: true }
+  ]
+  // 添加现有记录选项
+  for (let i = 0; i < count; i++) {
+    options.push({
+      value: i + 1,
+      label: `记录条${i + 1}`
+    })
+  }
+  return options
 })
 
 // 自定义下拉框状态
@@ -85,7 +93,7 @@ function selectRecord(value) {
 // 获取当前选中的标签
 function getSelectedLabel() {
   const option = recordOptions.value.find(opt => opt.value === selectedRecordIndex.value)
-  return option ? option.label : ''
+  return option ? option.label : '请选择'
 }
 
 // 显示 Toast
@@ -240,7 +248,7 @@ watch(recordOptions, (newOptions) => {
           <!-- 自定义 Select 组件 -->
           <div class="custom-select" :class="{ 'is-open': isDropdownOpen, 'is-disabled': loadingRecordCount || recordOptions.length === 0 }">
             <div class="custom-select-trigger" @click="toggleDropdown">
-              <span class="custom-select-value" v-if="selectedRecordIndex && getSelectedLabel()">
+              <span class="custom-select-value" v-if="selectedRecordIndex !== null && selectedRecordIndex !== undefined && getSelectedLabel()">
                 {{ getSelectedLabel() }}
               </span>
               <span class="custom-select-placeholder" v-else>
@@ -257,7 +265,10 @@ watch(recordOptions, (newOptions) => {
                 v-for="option in recordOptions" 
                 :key="option.value"
                 class="custom-select-option"
-                :class="{ 'is-selected': selectedRecordIndex === option.value }"
+                :class="{ 
+                  'is-selected': selectedRecordIndex === option.value,
+                  'is-create-new': option.isCreateNew 
+                }"
                 @click="selectRecord(option.value)"
               >
                 {{ option.label }}
@@ -797,6 +808,23 @@ watch(recordOptions, (newOptions) => {
   width: 18px;
   height: 18px;
   color: #3370ff;
+}
+
+/* 新增记录选项特殊样式 */
+.custom-select-option.is-create-new {
+  color: #34c759;
+  font-weight: 500;
+  border-bottom: 1px solid #f0f0f5;
+  margin-bottom: 4px;
+}
+
+.custom-select-option.is-create-new:hover {
+  background: #f0fff4;
+}
+
+.custom-select-option.is-create-new.is-selected {
+  background: #e8fff0;
+  color: #30a14e;
 }
 
 </style>

@@ -661,8 +661,9 @@ async def submit_form(
                 fields[field_name] = str(value)
         
         # 根据 record_index 决定是更新还是创建记录
+        # record_index=0 表示创建新记录，>0 表示更新对应索引的记录
         record_id = None
-        record_index = form.record_index or 1
+        record_index = form.record_index  # 不再默认为1，允许0表示创建新记录
         
         # 如果 record_index > 0，尝试获取对应的记录ID
         if record_index > 0:

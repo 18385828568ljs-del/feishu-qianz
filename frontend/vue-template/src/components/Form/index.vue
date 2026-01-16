@@ -62,17 +62,34 @@ const userKey = computed(() => `${userInfo.value.openId}::${userInfo.value.tenan
 async function init() {
   try {
     const selection = await bitable.base.getSelection()
+    
     state.value.tableId = selection.tableId || ''
     state.value.recordId = selection.recordId || ''
     currentAppToken.value = selection.baseId || ''
 
+    // 如果初始化时就有选中的字段，检查是否是附件字段
+    if (selection.fieldId && selection.tableId) {
+      try {
+        const table = await bitable.base.getTableById(selection.tableId)
+        const field = await table.getFieldMetaById(selection.fieldId)
+        if (field && (field.type === 'Attachment' || field.type === 17)) {
+          state.value.attachFieldId = selection.fieldId
+          // 初始选中附件字段
+        }
+      } catch (e) {
+        console.warn('[Init] 获取初始字段信息失败:', e)
+      }
+    }
+
     // 监听选中变化
     offSelectionChange = bitable.base.onSelectionChange(async (event) => {
+      
       if (event.data.recordId) {
         state.value.recordId = event.data.recordId
         if (event.data.tableId) {
           state.value.tableId = event.data.tableId
-          await refreshFieldInfo()
+          // 只有当tableId变化时才重新查找默认字段
+          // await refreshFieldInfo()  // 暂时注释，避免覆盖用户选择
         }
         
         // 检测选中的字段类型
@@ -80,12 +97,18 @@ async function init() {
           try {
             const table = await bitable.base.getTableById(state.value.tableId)
             const field = await table.getFieldMetaById(event.data.fieldId)
-            // 如果选中的不是附件字段，给出提示
-            if (field && field.type !== 'Attachment' && field.type !== 17) {
+
+            
+            // 如果选中的是附件字段，则使用该字段作为签名目标
+            if (field && (field.type === 'Attachment' || field.type === 17)) {
+              state.value.attachFieldId = event.data.fieldId
+              // 使用用户选中的附件字段
+            } else {
+              // 如果选中的不是附件字段，给出提示
               showToast('请选择附件/签名列后再进行签名！', 'warning', 2000)
             }
           } catch (e) {
-            // 忽略获取字段信息失败的错误
+            console.error('[Selection] 获取字段信息失败:', e)
           }
         }
       } else {
@@ -98,7 +121,10 @@ async function init() {
       return
     }
 
-    await refreshFieldInfo()
+    // 如果初始化时没有选中附件字段，才执行自动查找
+    if (!state.value.attachFieldId) {
+      await refreshFieldInfo()
+    }
     
     // 获取用户信息
     try {
@@ -176,7 +202,6 @@ async function uploadToField(fileOrBlob, fileName, mimeType) {
       file = new File([fileOrBlob], fileName, { type: mimeType })
     }
     
-    console.log('[Upload] Creating cell for file:', fileName)
     const cell = await attachField.createCell(file)
     
     await table.setCellValue(state.value.attachFieldId, state.value.recordId, cell.val)
@@ -185,7 +210,6 @@ async function uploadToField(fileOrBlob, fileName, mimeType) {
     if (!quota.value.inviteActive) {
       try {
         await consumeQuota(userInfo.value.openId, userInfo.value.tenantKey, 'local_upload', fileName)
-        console.log('[Quota] Quota consumed successfully')
       } catch (err) {
         console.warn('[Quota] Failed to consume quota:', err)
       }

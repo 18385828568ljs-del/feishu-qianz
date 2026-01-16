@@ -84,12 +84,10 @@ export async function redeemInvite(code, openId, tenantKey) {
 // 获取定价方案
 export async function getPricingPlans() {
   const { data } = await api.get('/api/pricing/plans')
-  console.log('API返回的完整数据:', data)
   // 确保返回数组格式
   if (data && data.plans) {
     return Array.isArray(data.plans) ? data.plans : []
   }
-  // 如果返回格式不对，尝试直接返回data（可能是数组）
   if (Array.isArray(data)) {
     return data
   }
@@ -99,12 +97,6 @@ export async function getPricingPlans() {
 // 创建支付订单
 export async function createOrder(planId, openId, tenantKey) {
   const { data } = await api.post('/api/payment/create', { plan_id: planId, open_id: openId, tenant_key: tenantKey })
-  return data
-}
-
-// 模拟支付（测试用）
-export async function mockPay(orderId) {
-  const { data } = await api.post('/api/payment/mock-pay', null, { params: { order_id: orderId } })
   return data
 }
 
@@ -138,6 +130,27 @@ export async function getTableFields(appToken, tableId, sessionId) {
 export async function getRecordCount(appToken, tableId, sessionId) {
   const { data } = await api.get('/api/form/record-count', {
     params: { app_token: appToken, table_id: tableId, session_id: sessionId }
+  })
+  return data
+}
+
+// ==================== 支付宝支付 (YunGouOS) ====================
+
+// 创建支付宝支付订单
+export async function createAlipayOrder(planId, openId, tenantKey, payType = 'native') {
+  const { data } = await api.post('/api/payment/alipay/create', {
+    plan_id: planId,
+    open_id: openId,
+    tenant_key: tenantKey,
+    pay_type: payType  // native（扫码）或 h5
+  })
+  return data
+}
+
+// 查询支付宝订单状态
+export async function queryAlipayOrder(orderId) {
+  const { data } = await api.get('/api/payment/alipay/query', {
+    params: { order_id: orderId }
   })
   return data
 }

@@ -103,15 +103,36 @@ async def startup_event():
         init_db()
         logger.info("Database tables initialized successfully")
         
-        # 执行数据库迁移（添加 record_index 字段）
+        # 执行数据库迁移
         try:
-            from migrations.add_record_index import migrate
-            migrate()
-        except ImportError:
-            # 如果迁移脚本不存在，跳过（不影响启动）
-            pass
+            # 迁移1：添加 record_index 字段
+            try:
+                from migrations.add_record_index import migrate as migrate_record_index
+                migrate_record_index()
+            except ImportError:
+                pass
+            except Exception as e:
+                logger.warning(f"Database migration (record_index) warning: {e}")
+            
+            # 迁移2：添加 pricing_plans 表新字段
+            try:
+                from migrations.add_pricing_plan_fields import migrate as migrate_pricing_fields
+                migrate_pricing_fields()
+            except ImportError:
+                pass
+            except Exception as e:
+                logger.warning(f"Database migration (pricing_plan_fields) warning: {e}")
+            
+            # 迁移3：添加 users 表套餐订阅字段
+            try:
+                from migrations.add_user_subscription_fields import migrate as migrate_user_subscription
+                migrate_user_subscription()
+            except ImportError:
+                pass
+            except Exception as e:
+                logger.warning(f"Database migration (user_subscription_fields) warning: {e}")
         except Exception as e:
-            logger.warning(f"Database migration warning: {e}")
+            logger.warning(f"Database migration error: {e}")
     except Exception as e:
         logger.error(f"Failed to initialize database tables: {e}")
         # 不抛出异常，允许应用继续启动（表可能已存在）

@@ -46,6 +46,12 @@ class User(Base):
     remaining_quota = Column(Integer, default=20, nullable=False)  # 剩余次数
     total_used = Column(Integer, default=0, nullable=False)  # 总使用次数
     
+    # 套餐订阅相关
+    current_plan_id = Column(String(32), nullable=True)  # 当前套餐ID（如 basic_monthly）
+    plan_expires_at = Column(DateTime, nullable=True)  # 套餐到期时间
+    plan_quota_reset_at = Column(DateTime, nullable=True)  # 配额重置时间（月付每月重置，年付每年重置）
+    is_unlimited = Column(Boolean, default=False, nullable=False)  # 是否不限次数
+    
     # 邀请码相关
     invite_code_used = Column(String(64), nullable=True)  # 使用的邀请码
     invite_expire_at = Column(DateTime, nullable=True)  # 邀请有效期
@@ -111,13 +117,20 @@ class PricingPlan(Base):
     __tablename__ = "pricing_plans"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    plan_id = Column(String(32), unique=True, nullable=False, index=True)  # 如 pack_10
-    name = Column(String(64), nullable=False)        # 如 "10次签名包"
-    quota_count = Column(Integer, nullable=False)    # 签名次数
+    plan_id = Column(String(32), unique=True, nullable=False, index=True)  # 如 basic_monthly, pro_monthly, pro_yearly
+    name = Column(String(64), nullable=False)        # 如 "入门版（月付）"
+    quota_count = Column(Integer, nullable=True)     # 签名次数（None表示不限次数）
     price = Column(Integer, nullable=False)          # 价格（分）
     is_active = Column(Boolean, default=True)        # 是否上架
     sort_order = Column(Integer, default=0)          # 排序（越小越靠前）
     description = Column(String(256), nullable=True) # 套餐描述
+    
+    # 新增字段：支持月付/年付
+    billing_type = Column(String(16), default="monthly", nullable=False)  # monthly 或 yearly
+    monthly_price = Column(Integer, nullable=True)   # 月付价格（分），用于年付套餐显示节省
+    yearly_price = Column(Integer, nullable=True)     # 年付价格（分），用于月付套餐显示节省
+    unlimited = Column(Boolean, default=False, nullable=False)  # 是否不限次数
+    save_percent = Column(Integer, nullable=True)    # 年付节省百分比（如24表示节省24%）
     
     # 时间戳
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 
 from sqlalchemy.orm import Session
+from dateutil.relativedelta import relativedelta
 
 from database import User, InviteCode, Order, SignatureLog, PricingPlan
 
@@ -14,11 +15,70 @@ from database import User, InviteCode, Order, SignatureLog, PricingPlan
 FREE_TRIAL_QUOTA = 10
 
 # 默认定价方案（数据库为空时自动初始化）
+# 固定套餐方案，不需要后台配置
 DEFAULT_PRICING_PLANS = [
-    {"id": "pack_10", "name": "10次签名包", "count": 10, "price": 990, "sort_order": 1},
-    {"id": "pack_50", "name": "50次签名包", "count": 50, "price": 3990, "sort_order": 2},
-    {"id": "pack_100", "name": "100次签名包", "count": 100, "price": 6990, "sort_order": 3},
-    {"id": "pack_500", "name": "500次签名包", "count": 500, "price": 29900, "sort_order": 4},
+    {
+        "id": "basic_monthly",
+        "name": "入门版",
+        "count": 2000,
+        "price": 2900,  # 29元
+        "billing_type": "monthly",
+        "unlimited": False,
+        "sort_order": 1,
+        "description": "每月2000次使用次数"
+    },
+    {
+        "id": "pro_monthly",
+        "name": "专业版",
+        "count": 6000,
+        "price": 9900,  # 99元
+        "billing_type": "monthly",
+        "monthly_price": 9900,
+        "yearly_price": 89900,  # 年付价格，用于显示节省
+        "save_percent": 24,
+        "unlimited": False,
+        "sort_order": 2,
+        "description": "每月6000次使用次数"
+    },
+    {
+        "id": "pro_yearly",
+        "name": "专业版",
+        "count": 6000,
+        "price": 89900,  # 899元
+        "billing_type": "yearly",
+        "monthly_price": 9900,  # 月付价格，用于显示节省
+        "yearly_price": 89900,
+        "save_percent": 24,
+        "unlimited": False,
+        "sort_order": 3,
+        "description": "年付¥899（相当于月付¥75，节省24%）"
+    },
+    {
+        "id": "enterprise_monthly",
+        "name": "企业版",
+        "count": None,  # 不限次数
+        "price": 29900,  # 299元
+        "billing_type": "monthly",
+        "monthly_price": 29900,
+        "yearly_price": 238800,  # 年付价格，用于显示节省
+        "save_percent": 33,
+        "unlimited": True,
+        "sort_order": 4,
+        "description": "不限次数"
+    },
+    {
+        "id": "enterprise_yearly",
+        "name": "企业版",
+        "count": None,  # 不限次数
+        "price": 238800,  # 2388元
+        "billing_type": "yearly",
+        "monthly_price": 29900,  # 月付价格，用于显示节省
+        "yearly_price": 238800,
+        "save_percent": 33,
+        "unlimited": True,
+        "sort_order": 5,
+        "description": "年付¥2,388（相当于月付¥199，节省33%）"
+    },
 ]
 
 
@@ -48,9 +108,56 @@ def get_or_create_user(db: Session, open_id: str, tenant_key: str) -> User:
     return user
 
 
+def check_and_reset_quota(db: Session, user: User) -> None:
+    """检查并重置用户配额（如果套餐到期或重置时间到了）"""
+    now = datetime.utcnow()
+    
+    # 如果用户没有套餐，不需要重置
+    if not user.current_plan_id:
+        return
+    
+    # 检查套餐是否过期
+    if user.plan_expires_at and user.plan_expires_at < now:
+        # 套餐已过期，清除套餐信息
+        user.current_plan_id = None
+        user.plan_expires_at = None
+        user.plan_quota_reset_at = None
+        user.is_unlimited = False
+        # 保留剩余配额（不清零），但不再自动重置
+        db.commit()
+        return
+    
+    # 检查是否需要重置配额（月付每月重置，年付每年重置）
+    if user.plan_quota_reset_at and user.plan_quota_reset_at < now:
+        # 获取套餐信息
+        plan = db.query(PricingPlan).filter(PricingPlan.plan_id == user.current_plan_id).first()
+        if plan:
+            if plan.unlimited:
+                # 不限次数，不需要重置配额
+                user.is_unlimited = True
+            else:
+                # 重置配额到套餐的配额数
+                user.remaining_quota = plan.quota_count or 0
+                user.is_unlimited = False
+            
+            # 计算下次重置时间
+            if plan.billing_type == "monthly":
+                # 月付：每月重置
+                user.plan_quota_reset_at = user.plan_quota_reset_at + relativedelta(months=1)
+            elif plan.billing_type == "yearly":
+                # 年付：每年重置
+                user.plan_quota_reset_at = user.plan_quota_reset_at + relativedelta(years=1)
+            
+            db.commit()
+
+
 def get_quota_status(db: Session, open_id: str, tenant_key: str) -> Dict[str, Any]:
     """获取用户配额状态"""
     user = get_or_create_user(db, open_id, tenant_key)
+    
+    # 检查并重置配额（如果需要）
+    check_and_reset_quota(db, user)
+    db.refresh(user)
     
     now = datetime.utcnow()
     invite_active = False
@@ -60,12 +167,26 @@ def get_quota_status(db: Session, open_id: str, tenant_key: str) -> Dict[str, An
         invite_active = True
         invite_expire_at = int(user.invite_expire_at.timestamp())
     
+    # 获取套餐总配额
+    plan_quota = None
+    if user.current_plan_id:
+        plan = db.query(PricingPlan).filter(PricingPlan.plan_id == user.current_plan_id).first()
+        if plan and not plan.unlimited:
+            plan_quota = plan.quota_count
+    elif not user.invite_expire_at or user.invite_expire_at <= now:
+        # 免费试用用户，总配额为 FREE_TRIAL_QUOTA
+        plan_quota = FREE_TRIAL_QUOTA
+    
     return {
-        "remaining": user.remaining_quota,
+        "remaining": user.remaining_quota if not user.is_unlimited else None,
+        "plan_quota": plan_quota,  # 套餐总配额（用于进度条显示）
+        "is_unlimited": user.is_unlimited,
         "total_used": user.total_used,
         "invite_active": invite_active,
         "invite_expire_at": invite_expire_at,
         "total_paid": user.total_paid,
+        "current_plan_id": user.current_plan_id,
+        "plan_expires_at": int(user.plan_expires_at.timestamp()) if user.plan_expires_at else None,
     }
 
 
@@ -73,10 +194,18 @@ def check_can_sign(db: Session, open_id: str, tenant_key: str) -> Dict[str, Any]
     """检查用户是否可以签名"""
     user = get_or_create_user(db, open_id, tenant_key)
     
+    # 检查并重置配额（如果需要）
+    check_and_reset_quota(db, user)
+    db.refresh(user)
+    
     now = datetime.utcnow()
     
     # 检查邀请码是否有效
     if user.invite_expire_at and user.invite_expire_at > now:
+        return {"can_sign": True, "reason": None, "consume_quota": False}
+    
+    # 检查是否不限次数
+    if user.is_unlimited:
         return {"can_sign": True, "reason": None, "consume_quota": False}
     
     # 检查剩余配额
@@ -90,11 +219,18 @@ def consume_quota(db: Session, open_id: str, tenant_key: str, file_token: str = 
     """消耗一次配额"""
     user = get_or_create_user(db, open_id, tenant_key)
     
+    # 检查并重置配额（如果需要）
+    check_and_reset_quota(db, user)
+    db.refresh(user)
+    
     now = datetime.utcnow()
     quota_consumed = False
     
     # 如果邀请码有效，不消耗配额
     if user.invite_expire_at and user.invite_expire_at > now:
+        quota_consumed = False
+    elif user.is_unlimited:
+        # 不限次数，不消耗配额
         quota_consumed = False
     elif user.remaining_quota > 0:
         user.remaining_quota -= 1
@@ -233,10 +369,16 @@ def init_default_pricing_plans(db: Session) -> None:
             plan = PricingPlan(
                 plan_id=plan_data["id"],
                 name=plan_data["name"],
-                quota_count=plan_data["count"],
+                quota_count=plan_data.get("count"),
                 price=plan_data["price"],
                 sort_order=plan_data.get("sort_order", 0),
                 is_active=True,
+                billing_type=plan_data.get("billing_type", "monthly"),
+                monthly_price=plan_data.get("monthly_price"),
+                yearly_price=plan_data.get("yearly_price"),
+                unlimited=plan_data.get("unlimited", False),
+                save_percent=plan_data.get("save_percent"),
+                description=plan_data.get("description"),
             )
             db.add(plan)
         db.commit()
@@ -255,9 +397,14 @@ def get_pricing_plans(db: Session) -> list:
         {
             "id": p.plan_id,
             "name": p.name,
-            "count": p.quota_count,
+            "count": p.quota_count,  # None表示不限次数
             "price": p.price,
             "description": p.description,
+            "billing_type": p.billing_type,  # monthly 或 yearly
+            "monthly_price": p.monthly_price,
+            "yearly_price": p.yearly_price,
+            "unlimited": p.unlimited,
+            "save_percent": p.save_percent,
         }
         for p in plans
     ]
@@ -318,14 +465,45 @@ def mock_pay_order(db: Session, order_id: str) -> Dict[str, Any]:
         db.commit()
         return {"success": False, "error": "ORDER_EXPIRED"}
     
+    # 获取套餐信息
+    plan = db.query(PricingPlan).filter(PricingPlan.plan_id == order.plan_id).first()
+    if not plan:
+        return {"success": False, "error": "PLAN_NOT_FOUND"}
+    
     # 更新订单状态
     order.status = "paid"
     order.paid_at = now
     
-    # 增加用户配额
+    # 更新用户套餐和配额
     user = db.query(User).filter(User.user_key == order.user_key).first()
     if user:
-        user.remaining_quota += order.quota_count
+        # 设置用户当前套餐
+        user.current_plan_id = order.plan_id
+        user.is_unlimited = plan.unlimited
+        
+        # 计算套餐到期时间
+        if plan.billing_type == "monthly":
+            user.plan_expires_at = now + relativedelta(months=1)
+            user.plan_quota_reset_at = now + relativedelta(months=1)
+        elif plan.billing_type == "yearly":
+            user.plan_expires_at = now + relativedelta(years=1)
+            user.plan_quota_reset_at = now + relativedelta(years=1)
+        else:
+            # 默认月付
+            user.plan_expires_at = now + relativedelta(months=1)
+            user.plan_quota_reset_at = now + relativedelta(months=1)
+        
+        # 设置配额
+        if plan.unlimited:
+            # 不限次数，不设置配额
+            user.is_unlimited = True
+            quota_added = None
+        else:
+            # 设置配额为套餐的配额数（不是累加）
+            user.remaining_quota = plan.quota_count or 0
+            user.is_unlimited = False
+            quota_added = plan.quota_count
+        
         user.total_paid += order.amount
     
     db.commit()
@@ -333,8 +511,10 @@ def mock_pay_order(db: Session, order_id: str) -> Dict[str, Any]:
     return {
         "success": True,
         "order_id": order_id,
-        "quota_added": order.quota_count,
-        "new_remaining": user.remaining_quota if user else 0,
+        "quota_added": quota_added,
+        "is_unlimited": plan.unlimited,
+        "new_remaining": None if plan.unlimited else (user.remaining_quota if user else 0),
+        "plan_expires_at": int(user.plan_expires_at.timestamp()) if user and user.plan_expires_at else None,
     }
 
 

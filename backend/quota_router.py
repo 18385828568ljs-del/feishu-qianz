@@ -44,10 +44,6 @@ class CreateOrderRequest(BaseModel):
     tenant_key: str
 
 
-class MockPayRequest(BaseModel):
-    order_id: str
-
-
 class CreateInviteRequest(BaseModel):
     max_usage: int = 10
     benefit_days: int = 365
@@ -173,7 +169,6 @@ def consume_quota(open_id: str, tenant_key: str, file_token: str = None,
         raise HTTPException(status_code=500, detail="系统错误")
 
 
-
 # ==================== 邀请码 API ====================
 
 @router.post("/invite/validate")
@@ -206,15 +201,6 @@ def create_order(req: CreateOrderRequest, db: Session = Depends(get_db)):
     result = quota_service.create_order(db, req.plan_id, req.open_id, req.tenant_key)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "CREATE_ORDER_FAILED"))
-    return result
-
-
-@router.post("/payment/mock-pay", summary="模拟支付（测试用）")
-def mock_pay(order_id: str = Query(..., description="订单ID"), db: Session = Depends(get_db)):
-    """模拟支付订单（测试用）"""
-    result = quota_service.mock_pay_order(db, order_id)
-    if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error", "PAY_FAILED"))
     return result
 
 
@@ -269,3 +255,175 @@ def init_database(x_admin_token: str = Header(None)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ==================== 支付宝支付 API (YunGouOS) ====================
+
+from fastapi import Request
+
+class AlipayOrderRequest(BaseModel):
+    """支付宝支付订单请求"""
+    plan_id: str
+    open_id: str
+    tenant_key: str
+    pay_type: str = "native"  # native 或 h5
+
+
+@router.post("/payment/alipay/create", summary="创建支付宝支付订单")
+def create_alipay_order(req: AlipayOrderRequest, db: Session = Depends(get_db)):
+    """
+    创建支付宝支付订单
+    
+    - pay_type: native（扫码支付）或 h5（H5支付）
+    - 返回二维码URL或跳转URL
+    """
+    from payment.yungouos import yungouos_payment
+    
+    # 从数据库查找套餐
+    from database import PricingPlan
+    plan = db.query(PricingPlan).filter(
+        PricingPlan.plan_id == req.plan_id,
+        PricingPlan.is_active == True
+    ).first()
+    
+    if not plan:
+        raise HTTPException(status_code=400, detail="套餐不存在")
+    
+    # 创建本地订单
+    order_result = quota_service.create_order(db, req.plan_id, req.open_id, req.tenant_key)
+    if not order_result.get("success"):
+        raise HTTPException(status_code=400, detail=order_result.get("error", "创建订单失败"))
+    
+    order_id = order_result["order_id"]
+    
+    # 更新支付方式为支付宝
+    from database import Order
+    order = db.query(Order).filter(Order.order_id == order_id).first()
+    if order:
+        order.payment_method = "alipay"
+        db.commit()
+    
+    amount = plan.price / 100.0  # 分转元
+    body = f"数签助手-{plan.name}"
+    
+    # 附加数据：用于回调时识别用户
+    attach = f"{req.open_id}|{req.tenant_key}|{req.plan_id}"
+    
+    # 调用 YunGouOS 创建支付
+    if req.pay_type == "h5":
+        result = yungouos_payment.h5_pay(order_id, amount, body, attach)
+        if result["success"]:
+            return {
+                "success": True,
+                "order_id": order_id,
+                "pay_type": "h5",
+                "pay_url": result["pay_url"],
+                "amount": plan.price,
+                "plan_name": plan.name,
+            }
+    else:
+        result = yungouos_payment.native_pay(order_id, amount, body, attach)
+        if result["success"]:
+            return {
+                "success": True,
+                "order_id": order_id,
+                "pay_type": "native",
+                "qr_code": result["qr_code"],
+                "amount": plan.price,
+                "plan_name": plan.name,
+            }
+    
+    # 支付创建失败
+    raise HTTPException(status_code=500, detail=result.get("error", "支付创建失败"))
+
+
+@router.post("/payment/alipay/notify", summary="支付宝回调通知")
+async def alipay_notify(request: Request, db: Session = Depends(get_db)):
+    """
+    YunGouOS 支付回调通知
+    
+    收到通知后验签并更新订单状态
+    """
+    from payment.yungouos import yungouos_payment
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # 获取表单数据
+        form_data = await request.form()
+        params = dict(form_data)
+        logger.info(f"收到支付宝回调: {params}")
+        
+        # 处理回调
+        result = yungouos_payment.handle_notify(params)
+        
+        if not result["success"]:
+            logger.error(f"回调验证失败: {result.get('error')}")
+            return "FAIL"
+        
+        out_trade_no = result["out_trade_no"]
+        attach = result.get("attach", "")
+        
+        # 解析附加数据
+        try:
+            parts = attach.split("|")
+            open_id = parts[0] if len(parts) > 0 else ""
+            tenant_key = parts[1] if len(parts) > 1 else ""
+            plan_id = parts[2] if len(parts) > 2 else ""
+        except:
+            open_id, tenant_key, plan_id = "", "", ""
+        
+        # 更新订单状态（使用模拟支付逻辑，实际会更新用户配额）
+        pay_result = quota_service.mock_pay_order(db, out_trade_no)
+        
+        if pay_result.get("success"):
+            logger.info(f"订单 {out_trade_no} 支付成功，配额已更新")
+        else:
+            logger.error(f"订单 {out_trade_no} 处理失败: {pay_result.get('error')}")
+        
+        # 返回 SUCCESS 告诉 YunGouOS 已收到通知
+        return "SUCCESS"
+        
+    except Exception as e:
+        logger.error(f"处理回调异常: {str(e)}")
+        return "FAIL"
+
+
+@router.get("/payment/alipay/query", summary="查询支付宝订单状态")
+def query_alipay_order(order_id: str, db: Session = Depends(get_db)):
+    """
+    查询支付宝订单状态
+    
+    前端轮询此接口检查支付是否完成
+    """
+    # 先查本地订单状态
+    local_result = quota_service.get_order_status(db, order_id)
+    
+    if not local_result.get("found"):
+        raise HTTPException(status_code=404, detail="订单不存在")
+    
+    # 如果本地已经是 paid 状态，直接返回
+    if local_result.get("status") == "paid":
+        return {
+            "success": True,
+            "status": "paid",
+            "order_id": order_id,
+        }
+    
+    # 否则查询 YunGouOS
+    from payment.yungouos import yungouos_payment
+    result = yungouos_payment.query_order(order_id)
+    
+    if result["success"] and result.get("trade_state") == "SUCCESS":
+        # 用户已支付，但回调可能还没到，手动处理
+        pay_result = quota_service.mock_pay_order(db, order_id)
+        return {
+            "success": True,
+            "status": "paid",
+            "order_id": order_id,
+        }
+    
+    return {
+        "success": True,
+        "status": local_result.get("status", "pending"),
+        "order_id": order_id,
+    }
