@@ -32,3 +32,9 @@ AFTER `plan_quota_reset_at`;
 -- AND TABLE_NAME = 'users' 
 -- AND COLUMN_NAME = 'current_plan_id';
 
+
+
+
+
+
+

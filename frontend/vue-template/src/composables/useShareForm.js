@@ -15,6 +15,7 @@ const loadingFields = ref(false)
 const showFieldSelector = ref(false)
 const currentAppToken = ref('')
 const selectedRecordIndex = ref(1) // 记录条索引，默认选择记录条1
+const showData = ref(false) // 是否在表单中显示关联记录的数据
 
 /**
  * 加载多维表格字段列表
@@ -130,9 +131,22 @@ async function handleCreateShareForm({ tableId, userKey, sessionId }, showToast)
         return false
     }
 
+    // 检查是否有签名字段需要上传文件
+    const signatureField = selectedFields.value.find(f => f.input_type === 'attachment')
+    if (signatureField && !sessionId) {
+        showToast?.('上传签名文件需要用户授权，请先完成飞书授权', 'error')
+        return false
+    }
+
     try {
         // 查找签名字段（附件类型）
         const signatureField = selectedFields.value.find(f => f.input_type === 'attachment')
+
+        console.log('[useShareForm] 创建表单参数:', {
+            record_index: selectedRecordIndex.value,
+            show_data: showData.value,
+            selectedFieldsCount: selectedFields.value.length
+        })
 
         const result = await createShareForm({
             name: shareFormName.value.trim(),
@@ -143,8 +157,11 @@ async function handleCreateShareForm({ tableId, userKey, sessionId }, showToast)
             fields: selectedFields.value,
             created_by: userKey,
             session_id: sessionId,
-            record_index: selectedRecordIndex.value // 传递记录条索引
+            record_index: selectedRecordIndex.value, // 传递记录条索引
+            show_data: showData.value // 传递是否显示数据的标记
         })
+        
+        console.log('[useShareForm] 表单创建结果:', result)
 
         if (result.success) {
             const baseUrl = window.location.origin || 'http://localhost:5173'
@@ -153,7 +170,18 @@ async function handleCreateShareForm({ tableId, userKey, sessionId }, showToast)
             if (result.has_auth) {
                 showToast?.('分享表单创建成功！', 'success')
             } else {
-                showToast?.('表单已创建，但授权信息保存失败', 'warning')
+                // 检查是否有签名字段
+                const hasSignatureField = selectedFields.value.some(f => f.input_type === 'attachment')
+                if (hasSignatureField) {
+                    showToast?.('⚠️ 表单已创建，但授权信息保存失败。如需上传签名文件，请重新授权后重新创建表单。', 'error', 5000)
+                } else {
+                    showToast?.('表单已创建，但授权信息保存失败。如需上传文件功能，请重新授权后重新创建表单。', 'warning', 5000)
+                }
+                
+                // 如果有警告信息，也显示
+                if (result.warning) {
+                    console.warn('[useShareForm] 授权警告:', result.warning)
+                }
             }
             return true
         }
@@ -245,6 +273,7 @@ function resetShareForm() {
     selectedFields.value = []
     showFieldSelector.value = false
     selectedRecordIndex.value = 1 // 重置为记录条1
+    showData.value = false // 重置显示数据开关
 }
 
 export function useShareForm() {
@@ -259,6 +288,7 @@ export function useShareForm() {
         showFieldSelector,
         currentAppToken,
         selectedRecordIndex,
+        showData,
         // 方法
         loadTableFields,
         toggleFieldSelection,

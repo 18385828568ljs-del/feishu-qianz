@@ -5,6 +5,7 @@ import json
 import uuid
 import os
 import requests
+import time
 from datetime import datetime
 from typing import Optional, List
 
@@ -69,6 +70,7 @@ class CreateFormRequest(BaseModel):
     created_by: Optional[str] = None
     session_id: Optional[str] = None
     record_index: Optional[int] = 1  # 记录条索引，默认为1
+    show_data: Optional[bool] = False  # 是否在表单中显示关联记录的数据
 
 
 class FormConfigResponse(BaseModel):
@@ -122,7 +124,15 @@ def refresh_access_token(refresh_token: str) -> tuple:
     })
     data = resp.json()
     if data.get("code") != 0:
-        raise Exception(f"刷新 access_token 失败: {data}")
+        # 将错误信息作为异常抛出，包含错误码和消息
+        error_code = data.get("code")
+        error_msg = data.get("msg", "")
+        error_info = {
+            "code": error_code,
+            "msg": error_msg,
+            "data": data
+        }
+        raise Exception(f"刷新 access_token 失败: {error_info}")
     d = data.get("data", {})
     return d.get("access_token"), d.get("refresh_token")
 
@@ -150,6 +160,11 @@ def upload_to_bitable(app_token: str, file_data: bytes, file_name: str, access_t
     result = resp.json()
     
     if result.get("code") != 0:
+        error_code = result.get("code")
+        error_msg = result.get("msg", "")
+        # 检查是否是权限错误 (1061004: forbidden)
+        if error_code == 1061004 or "forbidden" in error_msg.lower():
+            raise PermissionError(f"上传文件权限不足 (1061004): {result}")
         raise Exception(f"上传文件失败: {result}")
     
     return result["data"]["file_token"]
@@ -244,6 +259,48 @@ def get_bitable_record_by_index(app_token: str, table_id: str, record_index: int
         return None
 
 
+def get_bitable_record_data(app_token: str, table_id: str, record_id: str, access_token: str) -> Optional[dict]:
+    """
+    根据记录ID获取单条记录的完整数据
+    返回: 记录的字段数据字典，如果不存在则返回None
+    """
+    try:
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
+        
+        headers = {
+            "Authorization": f"Bearer {access_token}"
+        }
+        
+        log_to_file(f"[get_bitable_record_data] 请求URL: {url}")
+        log_to_file(f"[get_bitable_record_data] 记录ID: {record_id}")
+        
+        resp = requests.get(url, headers=headers)
+        result = resp.json()
+        
+        log_to_file(f"[get_bitable_record_data] API响应code: {result.get('code')}")
+        
+        if result.get("code") != 0:
+            log_to_file(f"[get_bitable_record_data] API Error: {result}")
+            return None
+        
+        record = result.get("data", {}).get("record")
+        if not record:
+            log_to_file(f"[get_bitable_record_data] 记录不存在")
+            return None
+        
+        fields = record.get("fields", {})
+        log_to_file(f"[get_bitable_record_data] 获取到的字段数量: {len(fields)}")
+        log_to_file(f"[get_bitable_record_data] 字段ID列表: {list(fields.keys())}")
+        
+        # 返回记录的字段数据
+        return fields
+    except Exception as e:
+        log_to_file(f"[get_bitable_record_data] Error: {e}")
+        import traceback
+        log_to_file(f"[get_bitable_record_data] Traceback: {traceback.format_exc()}")
+        return None
+
+
 def get_table_fields(app_token: str, table_id: str, access_token: str) -> list:
     """获取多维表格字段列表"""
     url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
@@ -296,12 +353,14 @@ def get_table_fields_api(app_token: str, table_id: str, session_id: Optional[str
                 # token 可能过期，尝试刷新
                 if token_data and token_data.get("refresh_token"):
                     try:
-                        from main import USER_TOKENS
                         new_access, new_refresh = refresh_access_token(token_data.get("refresh_token"))
                         access_token = new_access
                         # 更新存储
-                        USER_TOKENS[session_id]["access_token"] = new_access
-                        USER_TOKENS[session_id]["refresh_token"] = new_refresh
+                        from session_store import update_session
+                        update_session(session_id, {
+                            "access_token": new_access,
+                            "refresh_token": new_refresh
+                        })
                         raw_fields = get_table_fields(app_token, table_id, access_token)
                         print(f"[table-fields] Got {len(raw_fields)} fields using refreshed token")
                     except Exception as refresh_e:
@@ -388,12 +447,14 @@ def get_record_count_api(app_token: str, table_id: str, session_id: Optional[str
                 # token 可能过期，尝试刷新
                 if token_data and token_data.get("refresh_token"):
                     try:
-                        from main import USER_TOKENS
                         new_access, new_refresh = refresh_access_token(token_data.get("refresh_token"))
                         access_token = new_access
                         # 更新存储
-                        USER_TOKENS[session_id]["access_token"] = new_access
-                        USER_TOKENS[session_id]["refresh_token"] = new_refresh
+                        from session_store import update_session
+                        update_session(session_id, {
+                            "access_token": new_access,
+                            "refresh_token": new_refresh
+                        })
                         records = get_bitable_records(app_token, table_id, access_token)
                         print(f"[record-count] Got {len(records)} records using refreshed token")
                     except Exception as refresh_e:
@@ -431,18 +492,14 @@ def create_form(req: CreateFormRequest, db: Session = Depends(get_db)):
     
     # 从 main.py 的 USER_TOKENS 获取创建者的 refresh_token
     creator_refresh_token = None
-    log_to_file(f"[Form Create] session_id: {req.session_id}")
+    
     if req.session_id:
         try:
-            # 动态导入 main 模块，避免循环引用
             from main import USER_TOKENS
             token_data = USER_TOKENS.get(req.session_id)
-            log_to_file(f"[Form Create] token_data found: {token_data is not None}")
             if token_data:
                 creator_refresh_token = token_data.get("refresh_token")
-                log_to_file(f"[Form Create] refresh_token saved: {creator_refresh_token is not None}")
         except Exception as e:
-            # 如果导入失败，记录警告但不中断创建流程
             log_to_file(f"[Form Create] Failed to get refresh_token: {e}")
     
     form = SignForm(
@@ -454,19 +511,27 @@ def create_form(req: CreateFormRequest, db: Session = Depends(get_db)):
         signature_field_id=req.signature_field_id,
         extra_fields=extra_fields_json,
         created_by=req.created_by,
-        creator_refresh_token=creator_refresh_token,  # 保存创建者的 refresh_token
-        record_index=req.record_index or 1  # 保存记录条索引，默认为1
+        creator_session_id=req.session_id,  # 保存创建者的 session_id（用于获取最新的 refresh_token）
+        creator_refresh_token=creator_refresh_token,  # 保存创建者的 refresh_token（作为备用）
+        record_index=req.record_index or 1,  # 保存记录条索引，默认为1
+        show_data=req.show_data or False  # 保存是否显示数据的标记
     )
     
     db.add(form)
     db.commit()
     db.refresh(form)
     
+    has_auth = creator_refresh_token is not None
+    
+    if not has_auth:
+        log_to_file(f"[Form Create] Form {form_id} created without authorization")
+    
     return {
         "success": True,
         "form_id": form_id,
         "share_url": f"/sign/{form_id}",  # 前端路由
-        "has_auth": creator_refresh_token is not None  # 告知前端是否保存了授权
+        "has_auth": has_auth,  # 告知前端是否保存了授权
+        "warning": None if has_auth else "表单已创建，但未保存用户授权信息。如需上传文件，请重新授权后重新创建表单。"
     }
 
 
@@ -507,8 +572,209 @@ def get_form_config(form_id: str, db: Session = Depends(get_db)):
         "description": form.description,
         "fields": fields,
         "signature_field_id": form.signature_field_id,
-        "signature_required": signature_required
+        "signature_required": signature_required,
+        "show_data": form.show_data,  # 返回是否显示数据的标记
+        "record_index": form.record_index  # 返回记录条索引
     }
+
+
+@router.get("/{form_id}/record-data")
+def get_form_record_data(form_id: str, db: Session = Depends(get_db)):
+    """获取表单关联记录的数据（公开接口，无需认证）"""
+    form = db.query(SignForm).filter(
+        SignForm.form_id == form_id,
+        SignForm.is_active.is_(True)
+    ).first()
+    
+    if not form:
+        raise HTTPException(status_code=404, detail="表单不存在或已过期")
+    
+    # 检查是否过期
+    if form.expires_at and form.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=410, detail="表单已过期")
+    
+    # 检查是否启用了显示数据功能
+    if not form.show_data:
+        raise HTTPException(status_code=400, detail="该表单未启用显示数据功能")
+    
+    # 检查是否有有效的记录索引
+    if not form.record_index or form.record_index <= 0:
+        raise HTTPException(status_code=400, detail="该表单未关联有效记录")
+    
+    # 获取 access_token（优先使用创建者的 token，fallback 到 app token）
+    access_token = None
+    
+    # 尝试使用创建者的 refresh_token 获取 access_token
+    if form.creator_refresh_token:
+        try:
+            new_access_token, new_refresh_token = refresh_access_token(form.creator_refresh_token)
+            access_token = new_access_token
+
+            
+            # 🔧 关键修复：刷新成功后立即更新数据库中的 refresh_token
+            if new_refresh_token:
+                form.creator_refresh_token = new_refresh_token
+                db.commit()
+
+                
+                # 同时更新 USER_TOKENS（如果 session_id 存在）
+                if form.creator_session_id:
+                    try:
+                        from session_store import update_session
+                        update_session(form.creator_session_id, {
+                            "refresh_token": new_refresh_token,
+                            "access_token": new_access_token
+                        })
+
+                    except Exception as token_update_err:
+                        log_to_file(f"[get_form_record_data] ⚠️ Failed to update USER_TOKENS: {token_update_err}")
+        except Exception as e:
+            log_to_file(f"[get_form_record_data] Failed to refresh creator token: {e}")
+    
+    # 如果获取失败，使用 app token
+    if not access_token:
+        try:
+            access_token = get_app_access_token()
+
+        except Exception as e:
+            log_to_file(f"[get_form_record_data] Failed to get app token: {e}")
+            raise HTTPException(status_code=500, detail="无法获取访问令牌")
+
+    
+    # 根据 record_index 获取记录ID
+    try:
+        record_id = get_bitable_record_by_index(
+            form.app_token,
+            form.table_id,
+            form.record_index,
+            access_token
+        )
+        
+        if not record_id:
+            raise HTTPException(status_code=404, detail=f"记录条{form.record_index}不存在")
+        
+        # 获取记录的完整数据
+        record_fields = get_bitable_record_data(
+            form.app_token,
+            form.table_id,
+            record_id,
+            access_token
+        )
+        
+
+        
+        if not record_fields:
+            raise HTTPException(status_code=404, detail="无法获取记录数据")
+        
+        # 解析表单字段配置，用于数据转换
+        form_fields = []
+        if form.extra_fields:
+            try:
+                form_fields = json.loads(form.extra_fields)
+            except:
+                form_fields = []
+        
+        # 获取字段列表，建立字段名称到字段ID的映射
+        # 飞书API返回的记录数据使用字段名称作为键，而不是字段ID
+        field_name_to_id_map = {}
+        try:
+            raw_fields = get_table_fields(form.app_token, form.table_id, access_token)
+            for f in raw_fields:
+                field_name = f.get("field_name", "")
+                field_id = f.get("field_id", "")
+                if field_name and field_id:
+                    field_name_to_id_map[field_name] = field_id
+
+        except Exception as e:
+            log_to_file(f"[get_form_record_data] 获取字段列表失败: {e}")
+            # 如果获取失败，尝试直接使用字段名称匹配
+        
+        # 转换数据格式，只返回表单中配置的字段
+        converted_data = {}
+        field_id_map = {f.get("field_id"): f for f in form_fields}
+        
+
+        
+        # 将记录数据中的字段名称转换为字段ID
+        for field_key, value in record_fields.items():
+            # 尝试将字段键（可能是名称或ID）转换为字段ID
+            field_id = None
+            
+            # 如果字段键已经是字段ID（以fld开头），直接使用
+            if field_key.startswith("fld"):
+                field_id = field_key
+            # 否则，尝试通过字段名称映射查找字段ID
+            elif field_key in field_name_to_id_map:
+                field_id = field_name_to_id_map[field_key]
+            
+            if not field_id:
+                continue
+            
+            if field_id not in field_id_map:
+                continue
+            
+            field_config = field_id_map[field_id]
+            input_type = field_config.get("input_type", "text")
+            
+
+            
+            # 根据字段类型转换数据
+            if value is None:
+                converted_data[field_id] = None
+            elif input_type == "number":
+                # 数字类型
+                try:
+                    converted_data[field_id] = float(value) if value else None
+                except:
+                    converted_data[field_id] = None
+            elif input_type == "checkbox":
+                # 复选框：布尔值
+                converted_data[field_id] = bool(value)
+            elif input_type == "multiselect":
+                # 多选：数组
+                if isinstance(value, list):
+                    converted_data[field_id] = [str(item) for item in value]
+                else:
+                    converted_data[field_id] = [str(value)] if value else []
+            elif input_type == "date":
+                # 日期：时间戳转日期字符串
+                if isinstance(value, (int, float)) and value > 0:
+                    # 飞书日期时间戳是毫秒
+                    dt = datetime.fromtimestamp(value / 1000)
+                    converted_data[field_id] = dt.strftime("%Y-%m-%d")
+                else:
+                    converted_data[field_id] = None
+            elif input_type == "attachment":
+                # 附件：返回 file_token 数组（前端仅显示提示）
+                if isinstance(value, list) and len(value) > 0:
+                    # 提取 file_token
+                    file_tokens = []
+                    for item in value:
+                        if isinstance(item, dict):
+                            token = item.get("file_token") or item.get("token")
+                            if token:
+                                file_tokens.append(token)
+                    converted_data[field_id] = file_tokens if file_tokens else None
+                else:
+                    converted_data[field_id] = None
+            else:
+                # 文本、电话、邮箱、URL、单选等：直接使用字符串
+                converted_data[field_id] = str(value) if value else ""
+            
+
+        
+
+        
+        return {
+            "success": True,
+            "data": converted_data
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_to_file(f"[get_form_record_data] Error: {e}")
+        raise HTTPException(status_code=500, detail=f"获取记录数据失败: {str(e)}")
 
 
 @router.post("/{form_id}/submit")
@@ -519,11 +785,11 @@ async def submit_form(
     db: Session = Depends(get_db)
 ):
     """提交签名表单（公开接口）"""
-    # 查找表单
+    # 查找表单（使用行锁防止并发刷新 token）
     form = db.query(SignForm).filter(
         SignForm.form_id == form_id,
         SignForm.is_active.is_(True)
-    ).first()
+    ).with_for_update().first()
     
     if not form:
         raise HTTPException(status_code=404, detail="表单不存在")
@@ -535,42 +801,268 @@ async def submit_form(
         # 优先使用创建者的 refresh_token 刷新获取 access_token
         access_token = None
         token_type = "none"  # 记录使用的 token 类型
+        is_20026_fallback = False  # 记录是否是 20026 错误导致的 fallback
         
-        log_to_file(f"[Form Submit] Checking creator_refresh_token: {'exists' if form.creator_refresh_token else 'missing'}")
+        # 🔧 修复：始终从数据库获取最新的 refresh_token（因为 get_form_record_data 会更新它）
+        current_refresh_token = form.creator_refresh_token
+        session_id = form.creator_session_id
         
-        if form.creator_refresh_token:
-            try:
-                new_access_token, new_refresh_token = refresh_access_token(form.creator_refresh_token)
-                access_token = new_access_token
-                token_type = "user_token"
-                log_to_file(f"[Form Submit] Successfully refreshed user token")
-                
-                # 更新存储的 refresh_token
-                if new_refresh_token and new_refresh_token != form.creator_refresh_token:
-                    form.creator_refresh_token = new_refresh_token
-                    db.commit()
-            except Exception as refresh_err:
-                error_msg = str(refresh_err)
-                log_to_file(f"[Form Submit] Refresh failed: {error_msg}")
-                print(f"[Form Submit] Refresh failed: {refresh_err}")
-                # 如果 refresh_token 无效或过期，提示前端需要重新授权，而不是静默改用 app_token
-                if "invalid" in error_msg.lower() or "expired" in error_msg.lower() or "401" in error_msg:
-                    log_to_file(f"[Form Submit] Refresh token invalid/expired, clearing it and requiring re-auth")
-                    form.creator_refresh_token = None
-                    db.commit()
-                    # 直接返回 401，让前端引导用户重新授权
-                    raise HTTPException(
-                        status_code=401,
-                        detail="授权已失效，请返回表单管理后台重新完成飞书授权后再提交。"
-                    )
-                access_token = None
+        log_to_file(f"[Form Submit] Token status: refresh_token={'exists' if current_refresh_token else 'missing'}")
+        
+        # 使用 refresh_token 刷新获取 access_token
+        if current_refresh_token:
+            max_retries = 2  # 最多重试2次（初始尝试 + 1次重试）
+            retry_count = 0
+            refresh_success = False
+            
+            while retry_count < max_retries and not refresh_success:
+                try:
+                    new_access_token, new_refresh_token = refresh_access_token(current_refresh_token)
+                    access_token = new_access_token
+                    token_type = "user_token"
+                    log_to_file(f"[Form Submit] Successfully refreshed user token (attempt {retry_count + 1})")
+                    refresh_success = True
+                    
+                    # 立即更新存储的 refresh_token（飞书每次刷新都会返回新的 refresh_token，旧的会失效）
+                    if new_refresh_token:
+                        # 同时更新数据库和 USER_TOKENS
+                        form.creator_refresh_token = new_refresh_token
+                        db.commit()
+                        log_to_file(f"[Form Submit] Updated refresh_token in database")
+                        
+                        # 如果 session_id 存在，也更新 USER_TOKENS
+                        if session_id:
+                            try:
+                                from session_store import update_session
+                                update_session(session_id, {
+                                    "refresh_token": new_refresh_token,
+                                    "access_token": new_access_token
+                                })
+                                log_to_file(f"[Form Submit] Updated refresh_token in USER_TOKENS[session_id]")
+                            except Exception as e:
+                                log_to_file(f"[Form Submit] ⚠️ Failed to update USER_TOKENS: {e}")
+                except Exception as refresh_err:
+                    error_msg = str(refresh_err)
+                    log_to_file(f"[Form Submit] Refresh failed (attempt {retry_count + 1}): {error_msg}")
+                    print(f"[Form Submit] Refresh failed: {refresh_err}")
+                    
+                    # 检查是否是 refresh_token 已被使用的错误（错误码 20026）
+                    # 注意：20026 错误的错误消息包含 "invalid" 和 "used"，所以需要先检查 20026
+                    is_token_used = "20026" in error_msg or ("invalid" in error_msg.lower() and "used" in error_msg.lower())
+                    log_to_file(f"[Form Submit] Error analysis: is_token_used={is_token_used}, contains_20026={'20026' in error_msg}, contains_invalid={'invalid' in error_msg.lower()}, contains_used={'used' in error_msg.lower()}")
+                    log_to_file(f"[Form Submit] retry_count={retry_count}, max_retries={max_retries}")
+                    
+                    # 如果是 20026 错误，尝试重试或直接 fallback（绝对不能抛出 401）
+                    if is_token_used:
+                        log_to_file(f"[Form Submit] ✅ Detected 20026 error (token used), will retry or fallback to app_token (NEVER throw 401)")
+                        # 如果还有重试机会，从 USER_TOKENS 或数据库获取最新的 refresh_token
+                        if retry_count < max_retries - 1:
+                            log_to_file(f"[Form Submit] Token was used by another request, getting latest token and retrying...")
+                            log_to_file(f"[Form Submit] Current session_id: {session_id}, current_refresh_token (first 20 chars): {current_refresh_token[:20] if current_refresh_token else 'None'}...")
+                            try:
+                                # 等待一段时间，让另一个请求完成刷新和提交
+                                # 第一次等待 0.2 秒，第二次等待 0.5 秒
+                                wait_time = 0.2 if retry_count == 0 else 0.5
+                                time.sleep(wait_time)
+                                
+                                # 优先从 USER_TOKENS 获取最新的 refresh_token
+                                new_refresh_token = None
+                                found_session_id = session_id
+                                
+                                try:
+                                    from main import USER_TOKENS
+                                    log_to_file(f"[Form Submit] USER_TOKENS has {len(USER_TOKENS)} sessions: {list(USER_TOKENS.keys())}")
+                                    
+                                    # 如果有 session_id，先尝试从它获取
+                                    if session_id:
+                                        token_data = USER_TOKENS.get(session_id)
+                                        if token_data and token_data.get("refresh_token"):
+                                            test_token = token_data.get("refresh_token")
+                                            if test_token != current_refresh_token:
+                                                new_refresh_token = test_token
+                                                found_session_id = session_id
+                                                log_to_file(f"[Form Submit] Got updated refresh_token from USER_TOKENS[session_id={session_id}]")
+                                            else:
+                                                log_to_file(f"[Form Submit] USER_TOKENS[session_id={session_id}] has same refresh_token, will search other sessions")
+                                        else:
+                                            log_to_file(f"[Form Submit] USER_TOKENS[session_id={session_id}] not found or no refresh_token, will search other sessions")
+                                    
+                                    # 如果从 session_id 获取失败，或者没有 session_id，遍历所有 session 查找可用的 refresh_token
+                                    if not new_refresh_token:
+                                        log_to_file(f"[Form Submit] Searching all USER_TOKENS sessions for available refresh_token...")
+                                        # 遍历所有 session，尝试找到可用的 refresh_token
+                                        # 优先使用与当前 refresh_token 不同的 token（可能是更新的版本）
+                                        for sid in USER_TOKENS.keys():
+                                            try:
+                                                token_data = USER_TOKENS.get(sid)
+                                                if token_data and token_data.get("refresh_token"):
+                                                    test_token = token_data.get("refresh_token")
+                                                    # 如果找到不同的 refresh_token，使用它（在主循环中会验证有效性）
+                                                    if test_token != current_refresh_token:
+                                                        new_refresh_token = test_token
+                                                        found_session_id = sid
+                                                        log_to_file(f"[Form Submit] Found different refresh_token in session {sid}, will try it")
+                                                        # 同时更新表单的 creator_session_id，以便下次直接使用
+                                                        form.creator_session_id = sid
+                                                        db.commit()
+                                                        log_to_file(f"[Form Submit] Updated form.creator_session_id to {sid}")
+                                                        break
+                                            except Exception as e:
+                                                log_to_file(f"[Form Submit] Error checking session {sid}: {e}")
+                                                continue
+                                        
+                                        if not new_refresh_token:
+                                            log_to_file(f"[Form Submit] ⚠️ No different refresh_token found in any session")
+                                except Exception as e:
+                                    log_to_file(f"[Form Submit] Failed to get refresh_token from USER_TOKENS: {e}")
+                                    import traceback
+                                    log_to_file(f"[Form Submit] Traceback: {traceback.format_exc()}")
+                                
+                                # 如果从 USER_TOKENS 获取失败，重新查询数据库
+                                if not new_refresh_token:
+                                    db.rollback()  # 回滚当前事务，释放锁
+                                    form = db.query(SignForm).filter(
+                                        SignForm.form_id == form_id,
+                                        SignForm.is_active.is_(True)
+                                    ).with_for_update().first()
+                                    
+                                    if not form:
+                                        log_to_file(f"[Form Submit] Form not found after retry, falling back to app_token")
+                                        access_token = None
+                                        break
+                                    
+                                    if form.creator_refresh_token and form.creator_refresh_token != current_refresh_token:
+                                        new_refresh_token = form.creator_refresh_token
+                                        log_to_file(f"[Form Submit] Got updated refresh_token from database")
+                                
+                                # 如果找到了新的 refresh_token，重试
+                                if new_refresh_token and new_refresh_token != current_refresh_token:
+                                    log_to_file(f"[Form Submit] Found updated refresh_token, retrying with new token")
+                                    current_refresh_token = new_refresh_token
+                                    retry_count += 1
+                                    continue
+                                else:
+                                    log_to_file(f"[Form Submit] Refresh_token unchanged after wait (attempt {retry_count + 1})")
+                                    # refresh_token 未变化，可能是另一个请求还在处理，或者 refresh_token 确实无效
+                                    # 如果还有重试机会，再试一次
+                                    if retry_count < max_retries - 2:  # 还有一次重试机会
+                                        retry_count += 1
+                                        continue
+                                    else:
+                                        # 所有重试都失败，refresh_token 可能已经被之前的请求使用但数据库未更新
+                                        # 或者 refresh_token 确实无效
+                                        # 对于 20026 错误（token 被并发使用），如果重试后仍失败，应该 fallback 到 app_token
+                                        # 而不是直接抛出 401，因为旧版本就是这样处理的，可以正常工作
+                                        log_to_file(f"[Form Submit] Refresh_token unchanged after all retries (20026 error), falling back to app_token")
+                                        access_token = None
+                                        is_20026_fallback = True
+                                        break
+                            except Exception as db_err:
+                                log_to_file(f"[Form Submit] Error during retry logic (20026 error): {db_err}")
+                                # 对于 20026 错误，即使重试逻辑出错，也应该 fallback 到 app_token（与旧版本行为一致）
+                                log_to_file(f"[Form Submit] Retry logic failed for 20026 error, falling back to app_token")
+                                access_token = None
+                                is_20026_fallback = True
+                                break
+                        else:
+                            # 没有重试机会了，直接 fallback 到 app_token
+                            log_to_file(f"[Form Submit] 20026 error but no more retries (retry_count={retry_count}, max_retries={max_retries}), falling back to app_token")
+                            access_token = None
+                            is_20026_fallback = True
+                            break
+                    
+                    # 检查是否是 refresh_token 无效或过期的错误（非 20026 的无效错误）
+                    # 注意：20026 错误已经在上面处理了，这里只处理其他无效错误
+                    # 如果 is_token_used 为 True，说明已经处理过了，不应该继续执行
+                    if is_token_used:
+                        # 这不应该发生（20026 错误应该在上面已经 break 了），但如果发生了，fallback 到 app_token
+                        log_to_file(f"[Form Submit] ⚠️ is_token_used=True but didn't break, falling back to app_token")
+                        access_token = None
+                        is_20026_fallback = True
+                        break
+                    
+                    # 只有非 20026 错误才会继续执行到这里
+                    log_to_file(f"[Form Submit] Non-20026 error, checking if token is invalid/expired")
+                    is_invalid_token = False
+                    # 只有当错误不是 20026 时，才认为是无效 token
+                    # 20026 错误已经在上面处理了，这里只处理其他无效错误
+                    if "invalid" in error_msg.lower() and "20026" not in error_msg:
+                        is_invalid_token = True
+                        log_to_file(f"[Form Submit] Detected invalid token (non-20026)")
+                    elif "expired" in error_msg.lower() or "401" in error_msg:
+                        is_invalid_token = True
+                        log_to_file(f"[Form Submit] Detected expired token or 401 error")
+                    
+                    # 如果 refresh_token 无效或过期（非并发使用导致的），提示前端需要重新授权
+                    if is_invalid_token:
+                        log_to_file(f"[Form Submit] Refresh token invalid/expired, clearing it and requiring re-auth")
+                        try:
+                            form.creator_refresh_token = None
+                            db.commit()
+                        except Exception as clear_err:
+                            log_to_file(f"[Form Submit] Error clearing refresh_token: {clear_err}")
+                        # 直接返回 401，让前端引导用户重新授权
+                        raise HTTPException(
+                            status_code=401,
+                            detail="授权已失效，请返回表单管理后台重新完成飞书授权后再提交。"
+                        )
+                    
+                    # 其他错误（非 20026，非 invalid/expired），refresh_token 可能无效
+                    # 如果原本有 refresh_token，说明之前授权过，现在失效了，应该要求重新授权
+                    # 只有在完全没有 refresh_token 的情况下，才应该使用 app_token
+                    if form.creator_refresh_token:
+                        log_to_file(f"[Form Submit] Refresh_token exists but refresh failed (non-20026 error), requiring re-auth")
+                        try:
+                            form.creator_refresh_token = None
+                            db.commit()
+                            log_to_file(f"[Form Submit] Cleared invalid refresh_token")
+                        except Exception as clear_err:
+                            log_to_file(f"[Form Submit] Error clearing refresh_token: {clear_err}")
+                        raise HTTPException(
+                            status_code=401,
+                            detail="授权已失效，请返回表单管理后台重新完成飞书授权后再提交。"
+                        )
+                    else:
+                        # 没有 refresh_token，回退到 app_token（但可能没有文件上传权限）
+                        log_to_file(f"[Form Submit] No refresh_token, falling back to app_token")
+                        access_token = None
+                        break
         
         if not access_token:
+            # 检查是否需要上传文件（如果有签名文件）
+            if signature and signature.filename:
+                # 如果是 20026 错误导致的 fallback，不应该抛出 401，而应该尝试使用 app_token 上传（可能会失败，但这是合理的）
+                if is_20026_fallback:
+                    log_to_file(f"[Form Submit] File upload required but 20026 error fallback, will try app_token (may fail)")
+                else:
+                    # 需要上传文件，但只有 app_token（没有文件上传权限），要求重新授权
+                    log_to_file(f"[Form Submit] File upload required but only app_token available (no upload permission)")
+                    raise HTTPException(
+                        status_code=401,
+                        detail="上传文件需要用户授权。请返回表单管理后台重新完成飞书 OAuth 授权（需要 drive:app 权限），然后重新创建或编辑该表单。"
+                    )
+            
             log_to_file(f"[Form Submit] Falling back to app_token (user token unavailable)")
-            access_token = get_app_access_token()
-            token_type = "app_token"
+            try:
+                access_token = get_app_access_token()
+                token_type = "app_token"
+                log_to_file(f"[Form Submit] Successfully obtained app_token")
+            except Exception as app_token_err:
+                error_msg = f"获取 app_token 失败: {str(app_token_err)}"
+                log_to_file(f"[Form Submit] {error_msg}")
+                raise HTTPException(status_code=500, detail=error_msg)
         
         log_to_file(f"[Form Submit] Using token type: {token_type}")
+        
+        # 确保 form 对象有效（如果之前 rollback 过，form 可能已失效）
+        if not form or form.form_id != form_id:
+            log_to_file(f"[Form Submit] Form object invalid after rollback, re-querying...")
+            form = db.query(SignForm).filter(
+                SignForm.form_id == form_id,
+                SignForm.is_active.is_(True)
+            ).first()
+            if not form:
+                raise HTTPException(status_code=404, detail="表单不存在")
         
         # 解析表单数据
         extra_data = json.loads(form_data)
@@ -598,7 +1090,44 @@ async def submit_form(
             signature_data = await signature.read()
             if signature_data:
                 file_name = f"signature_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
-                file_token = upload_to_bitable(form.app_token, signature_data, file_name, access_token)
+                try:
+                    file_token = upload_to_bitable(form.app_token, signature_data, file_name, access_token)
+                except PermissionError as perm_err:
+                    # 如果是 20026 错误导致的 fallback，即使上传失败也应该允许提交（不包含签名）
+                    # 因为 20026 错误是并发使用导致的，不是真正的权限问题
+                    if is_20026_fallback:
+                        log_to_file(f"[Form Submit] Upload failed due to 20026 fallback (app_token has no upload permission), but allowing submission without signature. Error: {perm_err}")
+                        # 不抛出错误，继续提交表单（不包含签名）
+                        file_token = None
+                    else:
+                        # 权限错误：返回 403
+                        error_detail = f"上传文件权限不足。"
+                        if token_type == "app_token":
+                            error_detail += " 当前使用的是应用 token，缺少文件上传权限。"
+                            error_detail += " 请让表单创建者在后台重新完成飞书 OAuth 授权（需要 drive:app 权限），"
+                            error_detail += " 然后重新创建或编辑该表单。"
+                        else:
+                            error_detail += " 当前用户 token 权限不足。"
+                            error_detail += " 请检查授权范围是否包含文件上传（drive:app），"
+                            error_detail += " 或尝试重新授权后再提交。"
+                        log_to_file(f"[Form Submit] Upload permission error: {error_detail}, error: {perm_err}")
+                        raise HTTPException(status_code=403, detail=error_detail)
+                except Exception as upload_err:
+                    # 其他上传错误：记录日志并抛出
+                    error_str = str(upload_err)
+                    log_to_file(f"[Form Submit] Upload failed with token_type={token_type}: {error_str}")
+                    # 检查是否是授权错误
+                    if "401" in error_str or "unauthorized" in error_str.lower():
+                        error_detail = "上传文件时授权失败。"
+                        if token_type == "app_token":
+                            error_detail += " 应用 token 可能已过期或无效。"
+                            error_detail += " 请让表单创建者在后台重新完成飞书 OAuth 授权，然后重新创建或编辑该表单。"
+                        else:
+                            error_detail += " 用户 token 可能已过期或无效。"
+                            error_detail += " 请返回表单管理后台重新完成飞书 OAuth 授权后再提交。"
+                        raise HTTPException(status_code=401, detail=error_detail)
+                    # 其他错误返回 500，但包含详细错误信息
+                    raise HTTPException(status_code=500, detail=f"上传文件失败: {error_str}")
                 
                 # 查找附件类型字段
                 attachment_field_id = form.signature_field_id
@@ -608,7 +1137,7 @@ async def submit_form(
                             attachment_field_id = fc.get("field_id")
                             break
                 
-                if attachment_field_id:
+                if attachment_field_id and file_token:
                     # 使用字段名称而非字段ID
                     field_name = field_id_to_name.get(attachment_field_id) or attachment_field_id
                     fields[field_name] = [{"file_token": file_token}]
@@ -701,7 +1230,7 @@ async def submit_form(
             log_to_file(f"[Form Submit] {operation} record failed with token_type={token_type}: {error_str}")
             
             # 检查是否是权限错误 (91403: Forbidden)
-            if "91403" in error_str or "Forbidden" in error_str:
+            if "91403" in error_str or "Forbidden" in error_str or "permission" in error_str.lower():
                 error_detail = f"权限不足 (91403 Forbidden)。"
                 if token_type == "app_token":
                     error_detail += " 当前使用的是应用 token，缺少多维表格写入权限。"
@@ -718,6 +1247,20 @@ async def submit_form(
                 log_to_file(f"[Form Submit] Permission error: {error_detail}")
                 # 使用 403 返回给前端，而不是泛化为 500
                 raise HTTPException(status_code=403, detail=error_detail)
+            
+            # 检查是否是授权相关错误（401, 或明确的 unauthorized 错误）
+            # 注意：不检查 "token"，因为很多错误信息都包含这个词
+            if "401" in error_str or "unauthorized" in error_str.lower() or ("invalid" in error_str.lower() and ("access_token" in error_str.lower() or "token" in error_str.lower())):
+                error_detail = "授权失败或 token 无效。"
+                if token_type == "app_token":
+                    error_detail += " 应用 token 可能已过期或无效。"
+                    error_detail += " 请让表单创建者在后台重新完成飞书 OAuth 授权，然后重新创建或编辑该表单。"
+                else:
+                    error_detail += " 用户 token 可能已过期或无效。"
+                    error_detail += " 请返回表单管理后台重新完成飞书 OAuth 授权后再提交。"
+                
+                log_to_file(f"[Form Submit] Authorization error: {error_detail}")
+                raise HTTPException(status_code=401, detail=error_detail)
             
             if "1254045" in error_str or "FieldNameNotFound" in error_str:
                 print(f"[Form Submit] Field not found, attempting auto-repair for form {form_id}")
@@ -841,6 +1384,10 @@ async def submit_form(
         # 已经是带状态码的业务错误，直接抛出
         raise
     except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        log_to_file(f"[Form Submit] Unexpected error: {str(e)}\n{error_trace}")
+        print(f"[Form Submit] Unexpected error: {str(e)}\n{error_trace}")
         raise HTTPException(status_code=500, detail=f"提交失败: {str(e)}")
 
 

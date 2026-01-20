@@ -5,9 +5,71 @@
 import { ref } from 'vue'
 import { authStart, authStatus } from '@/services/api'
 
+// localStorage 键名
+const SESSION_ID_KEY = 'feishu_session_id'
+
 // 响应式状态
 const sessionId = ref('')
 const authorized = ref(false)
+
+// 初始化标志，确保只初始化一次
+let initialized = false
+
+/**
+ * 从 localStorage 加载 sessionId
+ */
+function loadSessionIdFromStorage() {
+    try {
+        const stored = localStorage.getItem(SESSION_ID_KEY)
+        if (stored) {
+            sessionId.value = stored
+            // 验证 sessionId 是否仍然有效
+            verifySessionId()
+        }
+    } catch (e) {
+        console.warn('[Auth] Failed to load sessionId from localStorage:', e)
+    }
+}
+
+/**
+ * 保存 sessionId 到 localStorage
+ */
+function saveSessionIdToStorage(sid) {
+    try {
+        if (sid) {
+            localStorage.setItem(SESSION_ID_KEY, sid)
+        } else {
+            localStorage.removeItem(SESSION_ID_KEY)
+        }
+    } catch (e) {
+        console.warn('[Auth] Failed to save sessionId to localStorage:', e)
+    }
+}
+
+/**
+ * 验证 sessionId 是否仍然有效
+ */
+async function verifySessionId() {
+    if (!sessionId.value) {
+        authorized.value = false
+        return
+    }
+    
+    try {
+        const st = await authStatus(sessionId.value)
+        authorized.value = !!st.authorized
+        // 如果 sessionId 无效，清除它
+        if (!authorized.value) {
+            console.warn('[Auth] SessionId is invalid, clearing it')
+            sessionId.value = ''
+            saveSessionIdToStorage('')
+        }
+    } catch (e) {
+        console.warn('[Auth] Failed to verify sessionId:', e)
+        // 验证失败时不清除，可能是网络问题
+        authorized.value = false
+    }
+}
 
 /**
  * 发起飞书授权
@@ -16,9 +78,7 @@ const authorized = ref(false)
  */
 async function startAuth(showToast) {
     try {
-        console.log('[Auth] Starting auth flow...')
         const { auth_url } = await authStart()
-        console.log('[Auth] Got auth_url:', auth_url)
 
         // 打开新窗口进行飞书用户授权
         const win = window.open(auth_url, '_blank', 'width=720,height=720')
@@ -28,13 +88,12 @@ async function startAuth(showToast) {
         }
 
         const handler = async (ev) => {
-            console.log('[Auth] Received message:', ev.data)
             if (!ev?.data || ev.data.type !== 'feishu-auth-done' || !ev.data.session_id) {
-                console.log('[Auth] Message ignored:', ev.data)
                 return
             }
             sessionId.value = ev.data.session_id
-            console.log('[Auth] Got session_id:', sessionId.value)
+            // 保存到 localStorage
+            saveSessionIdToStorage(sessionId.value)
             window.removeEventListener('message', handler)
 
             // 查询授权状态（带重试机制，因为可能存在时序问题）
@@ -42,9 +101,7 @@ async function startAuth(showToast) {
             const maxRetries = 3
             const checkAuthStatus = async () => {
                 try {
-                    console.log(`[Auth] Checking auth status (attempt ${retryCount + 1}/${maxRetries})...`)
                     const st = await authStatus(sessionId.value)
-                    console.log('[Auth] Auth status response:', st)
                     authorized.value = !!st.authorized
                     if (authorized.value) {
                         showToast?.('已授权，可将文件上传到个人空间', 'success')
@@ -52,19 +109,15 @@ async function startAuth(showToast) {
                         // 如果未授权且还有重试次数，延迟后重试
                         if (retryCount < maxRetries - 1) {
                             retryCount++
-                            console.log(`[Auth] Not authorized yet, retrying in 500ms...`)
                             setTimeout(checkAuthStatus, 500)
                         } else {
-                            console.error('[Auth] Auth status check failed after retries')
                             showToast?.('授权状态异常，请重新授权', 'warning')
                         }
                     }
                 } catch (e) {
-                    console.error('[Auth] Status check error:', e)
                     // 如果还有重试次数，延迟后重试
                     if (retryCount < maxRetries - 1) {
                         retryCount++
-                        console.log(`[Auth] Error occurred, retrying in 500ms...`)
                         setTimeout(checkAuthStatus, 500)
                     } else {
                         showToast?.('授权状态检查失败，但 session_id 已保存', 'warning')
@@ -80,7 +133,6 @@ async function startAuth(showToast) {
         // 设置超时
         setTimeout(() => {
             if (!authorized.value && !sessionId.value) {
-                console.warn('[Auth] Timeout waiting for auth callback')
                 showToast?.('授权超时，请检查授权窗口是否正常关闭', 'warning', 3000)
             }
         }, 30000)
@@ -92,7 +144,6 @@ async function startAuth(showToast) {
             }
         }, 500)
     } catch (e) {
-        console.error('[Auth] Error:', e)
         showToast?.('打开授权页失败：' + (e?.message || e), 'error')
     }
 }
@@ -103,13 +154,29 @@ async function startAuth(showToast) {
 function resetAuth() {
     sessionId.value = ''
     authorized.value = false
+    saveSessionIdToStorage('')
+}
+
+/**
+ * 初始化授权状态（从 localStorage 恢复）
+ */
+function initAuth() {
+    loadSessionIdFromStorage()
 }
 
 export function useAuth() {
+    // 首次调用时自动加载保存的 sessionId
+    if (!initialized) {
+        initAuth()
+        initialized = true
+    }
+    
     return {
         sessionId,
         authorized,
         startAuth,
-        resetAuth
+        resetAuth,
+        initAuth,
+        verifySessionId
     }
 }

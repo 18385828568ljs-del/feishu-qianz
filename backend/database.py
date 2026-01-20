@@ -99,7 +99,7 @@ class Order(Base):
     
     # 订单内容
     plan_id = Column(String(32), nullable=False)  # 套餐ID
-    quota_count = Column(Integer, nullable=False)  # 购买次数
+    quota_count = Column(Integer, nullable=True)  # 购买次数 (None表示不限次数)
     amount = Column(Integer, nullable=False)  # 金额（分）
     
     # 支付信息
@@ -178,7 +178,8 @@ class SignForm(Base):
     
     # 创建者
     created_by = Column(String(256), nullable=True)  # user_key
-    creator_refresh_token = Column(Text, nullable=True)  # 创建者的 refresh_token（用于外部表单提交）
+    creator_session_id = Column(String(64), nullable=True)  # 创建者的 session_id（用于从 USER_TOKENS 获取最新的 refresh_token）
+    creator_refresh_token = Column(Text, nullable=True)  # 创建者的 refresh_token（用于外部表单提交，作为备用）
     
     # 状态
     is_active = Column(Boolean, default=True, nullable=False)
@@ -186,6 +187,9 @@ class SignForm(Base):
     
     # 记录条索引
     record_index = Column(Integer, default=1, nullable=False)  # 记录条索引，默认为1（记录条1）
+    
+    # 显示数据
+    show_data = Column(Boolean, default=False, nullable=False)  # 是否在表单中显示关联记录的数据
     
     # 提交统计
     submit_count = Column(Integer, default=0, nullable=False)

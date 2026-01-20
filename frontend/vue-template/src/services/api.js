@@ -1,12 +1,30 @@
 import axios from 'axios'
 
+// baseURL 规则：
+// - 显式配置了 VITE_API_BASE：始终优先使用（适合多环境部署）
+// - 开发环境（import.meta.env.DEV）：如果未配置，则默认 http://localhost:8000
+// - 生产环境：如果未配置，则默认同源 window.location.origin
+let defaultBase = 'http://localhost:8000'
+
+if (typeof window !== 'undefined' && window.location?.origin) {
+  if (import.meta.env.DEV) {
+    // dev 环境下，大部分人后端都跑在 8000，这里保持 8000 作为默认，
+    // 避免像现在这样打到了 Vite 的 5173 上导致 404
+    defaultBase = 'http://localhost:8000'
+  } else {
+    // 生产环境默认同源
+    defaultBase = window.location.origin
+  }
+}
+
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE || 'http://localhost:8000',
+  baseURL: import.meta.env.VITE_API_BASE || defaultBase,
   timeout: 20000,
 })
 
 // 是否开启调试日志（仅开发环境）
 const DEBUG = import.meta.env.DEV
+if (DEBUG) console.log('[API] baseURL =', api.defaults.baseURL)
 
 // 添加请求拦截器
 api.interceptors.request.use(
@@ -131,6 +149,12 @@ export async function getRecordCount(appToken, tableId, sessionId) {
   const { data } = await api.get('/api/form/record-count', {
     params: { app_token: appToken, table_id: tableId, session_id: sessionId }
   })
+  return data
+}
+
+// 获取表单关联记录的数据
+export async function getFormRecordData(formId) {
+  const { data } = await api.get(`/api/form/${formId}/record-data`)
   return data
 }
 

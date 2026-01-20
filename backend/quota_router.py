@@ -276,64 +276,80 @@ def create_alipay_order(req: AlipayOrderRequest, db: Session = Depends(get_db)):
     - pay_type: native（扫码支付）或 h5（H5支付）
     - 返回二维码URL或跳转URL
     """
-    from payment.yungouos import yungouos_payment
+    import logging
+    logger = logging.getLogger("uvicorn.error")
     
-    # 从数据库查找套餐
-    from database import PricingPlan
-    plan = db.query(PricingPlan).filter(
-        PricingPlan.plan_id == req.plan_id,
-        PricingPlan.is_active == True
-    ).first()
-    
-    if not plan:
-        raise HTTPException(status_code=400, detail="套餐不存在")
-    
-    # 创建本地订单
-    order_result = quota_service.create_order(db, req.plan_id, req.open_id, req.tenant_key)
-    if not order_result.get("success"):
-        raise HTTPException(status_code=400, detail=order_result.get("error", "创建订单失败"))
-    
-    order_id = order_result["order_id"]
-    
-    # 更新支付方式为支付宝
-    from database import Order
-    order = db.query(Order).filter(Order.order_id == order_id).first()
-    if order:
-        order.payment_method = "alipay"
-        db.commit()
-    
-    amount = plan.price / 100.0  # 分转元
-    body = f"数签助手-{plan.name}"
-    
-    # 附加数据：用于回调时识别用户
-    attach = f"{req.open_id}|{req.tenant_key}|{req.plan_id}"
-    
-    # 调用 YunGouOS 创建支付
-    if req.pay_type == "h5":
-        result = yungouos_payment.h5_pay(order_id, amount, body, attach)
-        if result["success"]:
-            return {
-                "success": True,
-                "order_id": order_id,
-                "pay_type": "h5",
-                "pay_url": result["pay_url"],
-                "amount": plan.price,
-                "plan_name": plan.name,
-            }
-    else:
-        result = yungouos_payment.native_pay(order_id, amount, body, attach)
-        if result["success"]:
-            return {
-                "success": True,
-                "order_id": order_id,
-                "pay_type": "native",
-                "qr_code": result["qr_code"],
-                "amount": plan.price,
-                "plan_name": plan.name,
-            }
-    
-    # 支付创建失败
-    raise HTTPException(status_code=500, detail=result.get("error", "支付创建失败"))
+    try:
+        from payment.yungouos import yungouos_payment
+        
+        # 从数据库查找套餐
+        from database import PricingPlan
+        plan = db.query(PricingPlan).filter(
+            PricingPlan.plan_id == req.plan_id,
+            PricingPlan.is_active == True
+        ).first()
+        
+        if not plan:
+            logger.warning(f"Plan not found: {req.plan_id}")
+            raise HTTPException(status_code=400, detail="套餐不存在")
+        
+        # 创建本地订单
+        order_result = quota_service.create_order(db, req.plan_id, req.open_id, req.tenant_key)
+        if not order_result.get("success"):
+            logger.error(f"Failed to create local order: {order_result.get('error')}")
+            raise HTTPException(status_code=400, detail=order_result.get("error", "创建订单失败"))
+        
+        order_id = order_result["order_id"]
+        
+        # 更新支付方式为支付宝
+        from database import Order
+        order = db.query(Order).filter(Order.order_id == order_id).first()
+        if order:
+            order.payment_method = "alipay"
+            db.commit()
+        
+        amount = plan.price / 100.0  # 分转元
+        body = f"数签助手-{plan.name}"
+        
+        # 附加数据：用于回调时识别用户
+        attach = f"{req.open_id}|{req.tenant_key}|{req.plan_id}"
+        
+        # 调用 YunGouOS 创建支付
+        if req.pay_type == "h5":
+            result = yungouos_payment.h5_pay(order_id, amount, body, attach)
+            if result["success"]:
+                return {
+                    "success": True,
+                    "order_id": order_id,
+                    "pay_type": "h5",
+                    "pay_url": result["pay_url"],
+                    "amount": plan.price,
+                    "plan_name": plan.name,
+                }
+        else:
+            result = yungouos_payment.native_pay(order_id, amount, body, attach)
+            if result["success"]:
+                return {
+                    "success": True,
+                    "order_id": order_id,
+                    "pay_type": "native",
+                    "qr_code": result["qr_code"],
+                    "amount": plan.price,
+                    "plan_name": plan.name,
+                }
+        
+        # 支付创建失败
+        error_msg = result.get("error", "支付创建失败")
+        logger.error(f"YunGouOS payment creation failed: {error_msg}")
+        raise HTTPException(status_code=500, detail=error_msg)
+        
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.exception(f"Unexpected error in create_alipay_order: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")
 
 
 @router.post("/payment/alipay/notify", summary="支付宝回调通知")

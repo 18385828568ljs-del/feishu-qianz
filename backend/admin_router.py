@@ -849,6 +849,12 @@ class CreatePricingPlanRequest(BaseModel):
     price: int            # 价格（分）
     sort_order: int = 0   # 排序
     description: Optional[str] = None  # 描述
+    # 可选：高级字段（不填则由后端自动同步/推导）
+    billing_type: Optional[str] = None  # monthly | yearly
+    monthly_price: Optional[int] = None
+    yearly_price: Optional[int] = None
+    unlimited: Optional[bool] = None
+    save_percent: Optional[int] = None
 
 
 class UpdatePricingPlanRequest(BaseModel):
@@ -859,6 +865,44 @@ class UpdatePricingPlanRequest(BaseModel):
     sort_order: Optional[int] = None
     description: Optional[str] = None
     is_active: Optional[bool] = None
+    # 高级字段（可选）
+    billing_type: Optional[str] = None  # monthly | yearly
+    monthly_price: Optional[int] = None
+    yearly_price: Optional[int] = None
+    unlimited: Optional[bool] = None
+    save_percent: Optional[int] = None
+
+
+def _sync_pricing_derived_fields(plan: PricingPlan) -> None:
+    """
+    同步/推导价格相关字段，避免后台只改 price 导致 yearly_price/monthly_price/save_percent 不一致。
+    约定：
+    - price 始终是"当前套餐实际售卖价（分）"
+    - monthly_price/yearly_price 用于跨月/年展示节省信息（可为空）
+    - save_percent 仅在 monthly_price 和 yearly_price 同时存在且 monthly_price>0 时自动推导
+    """
+    # 1) 同步当前计费类型下的对应字段
+    if plan.billing_type == "monthly":
+        # 仅在管理员未显式设置 monthly_price 时兜底同步
+        if plan.monthly_price is None:
+            plan.monthly_price = plan.price
+    elif plan.billing_type == "yearly":
+        # 仅在管理员未显式设置 yearly_price 时兜底同步
+        if plan.yearly_price is None:
+            plan.yearly_price = plan.price
+    else:
+        # 兜底：未知类型当月付
+        plan.billing_type = "monthly"
+        if plan.monthly_price is None:
+            plan.monthly_price = plan.price
+
+    # 2) 推导 save_percent（年付相对月付的节省）
+    # save_percent = round(1 - yearly_price / (monthly_price*12)) * 100
+    if plan.monthly_price and plan.yearly_price and plan.monthly_price > 0:
+        yearly_from_monthly = plan.monthly_price * 12
+        if yearly_from_monthly > 0 and plan.yearly_price > 0:
+            saved = max(0.0, 1.0 - (plan.yearly_price / float(yearly_from_monthly)))
+            plan.save_percent = int(round(saved * 100))
 
 
 @router.get("/pricing", summary="套餐列表")
@@ -881,6 +925,11 @@ def list_pricing_plans(
             "name": p.name,
             "quota_count": p.quota_count,
             "price": p.price,
+            "billing_type": p.billing_type,
+            "monthly_price": p.monthly_price,
+            "yearly_price": p.yearly_price,
+            "unlimited": p.unlimited,
+            "save_percent": p.save_percent,
             "is_active": p.is_active,
             "sort_order": p.sort_order,
             "description": p.description,
@@ -902,6 +951,12 @@ def create_pricing_plan(
     if existing:
         raise HTTPException(status_code=400, detail="套餐ID已存在")
     
+    # 基础校验
+    if req.price < 0:
+        raise HTTPException(status_code=400, detail="价格不能为负数")
+    if req.quota_count is not None and req.quota_count < 0:
+        raise HTTPException(status_code=400, detail="签名次数不能为负数")
+
     plan = PricingPlan(
         plan_id=req.plan_id,
         name=req.name,
@@ -910,7 +965,14 @@ def create_pricing_plan(
         sort_order=req.sort_order,
         description=req.description,
         is_active=True,
+        billing_type=req.billing_type or "monthly",
+        monthly_price=req.monthly_price,
+        yearly_price=req.yearly_price,
+        unlimited=bool(req.unlimited) if req.unlimited is not None else False,
+        save_percent=req.save_percent,
     )
+    # 自动同步派生字段（尤其是 monthly_price/yearly_price/save_percent）
+    _sync_pricing_derived_fields(plan)
     db.add(plan)
     db.commit()
     db.refresh(plan)
@@ -940,6 +1002,8 @@ def update_pricing_plan(
     if req.quota_count is not None:
         plan.quota_count = req.quota_count
     if req.price is not None:
+        if req.price < 0:
+            raise HTTPException(status_code=400, detail="价格不能为负数")
         plan.price = req.price
     if req.sort_order is not None:
         plan.sort_order = req.sort_order
@@ -947,6 +1011,34 @@ def update_pricing_plan(
         plan.description = req.description
     if req.is_active is not None:
         plan.is_active = req.is_active
+    if req.billing_type is not None:
+        if req.billing_type not in ("monthly", "yearly"):
+            raise HTTPException(status_code=400, detail="billing_type 只能是 monthly 或 yearly")
+        plan.billing_type = req.billing_type
+    if req.monthly_price is not None:
+        if req.monthly_price < 0:
+            raise HTTPException(status_code=400, detail="monthly_price 不能为负数")
+        plan.monthly_price = req.monthly_price
+    if req.yearly_price is not None:
+        if req.yearly_price < 0:
+            raise HTTPException(status_code=400, detail="yearly_price 不能为负数")
+        plan.yearly_price = req.yearly_price
+    if req.unlimited is not None:
+        plan.unlimited = req.unlimited
+        # unlimited 时 quota_count 通常应为 NULL；这里不强制覆盖，但允许管理员自己调
+    if req.save_percent is not None:
+        if req.save_percent < 0 or req.save_percent > 100:
+            raise HTTPException(status_code=400, detail="save_percent 必须在 0-100 之间")
+        plan.save_percent = req.save_percent
+
+    # 同步派生字段（避免只改 price 导致展示/购买不一致）
+    # 如果管理员只改了 price（没有显式传 monthly_price/yearly_price），则把 price 同步到当前计费类型字段
+    if req.price is not None:
+        if plan.billing_type == "monthly" and req.monthly_price is None:
+            plan.monthly_price = plan.price
+        if plan.billing_type == "yearly" and req.yearly_price is None:
+            plan.yearly_price = plan.price
+    _sync_pricing_derived_fields(plan)
     
     db.commit()
     

@@ -294,6 +294,7 @@
 
 <script setup>
 import { ref, onMounted, nextTick, computed, watch } from 'vue'
+import { getFormRecordData } from '@/services/api'
 
 // 从 URL 获取表单 ID
 const formId = new URLSearchParams(window.location.search).get('id') || ''
@@ -363,6 +364,77 @@ async function loadFormConfig() {
       }
     })
     
+    // 如果启用了显示数据功能，预填充记录数据
+    console.log('[SignPage] 检查预填充条件:', {
+      show_data: formConfig.value.show_data,
+      record_index: formConfig.value.record_index,
+      form_id: formId
+    })
+    
+    if (formConfig.value.show_data && formConfig.value.record_index > 0) {
+      try {
+        console.log('[SignPage] 开始加载记录数据...')
+        const recordDataResult = await getFormRecordData(formId)
+        console.log('[SignPage] 记录数据响应:', recordDataResult)
+        
+        if (recordDataResult && recordDataResult.success && recordDataResult.data) {
+          const recordData = recordDataResult.data
+          console.log('[SignPage] 解析后的记录数据:', recordData)
+          console.log('[SignPage] 记录数据中的所有字段ID:', Object.keys(recordData))
+          console.log('[SignPage] 表单字段列表:', formConfig.value.fields?.map(f => ({ id: f.field_id, label: f.label, type: f.input_type })))
+          
+          let filledCount = 0
+          // 填充数据到表单
+          formConfig.value.fields?.forEach(field => {
+            // 检查字段ID是否存在于记录数据中
+            const fieldExists = recordData.hasOwnProperty(field.field_id)
+            console.log(`[SignPage] 检查字段 ${field.field_id} (${field.label}): 存在=${fieldExists}, 值=`, recordData[field.field_id])
+            
+            if (fieldExists) {
+              const value = recordData[field.field_id]
+              console.log(`[SignPage] 填充字段 ${field.field_id} (${field.label}):`, value)
+              
+              // 根据字段类型处理数据
+              if (field.input_type === 'multiselect') {
+                // 多选：确保是数组
+                formData.value[field.field_id] = Array.isArray(value) ? value : (value ? [value] : [])
+              } else if (field.input_type === 'checkbox') {
+                // 复选框：布尔值
+                formData.value[field.field_id] = Boolean(value)
+              } else if (field.input_type === 'attachment') {
+                // 附件：如果有数据，显示提示（不实际预填充文件）
+                if (value && Array.isArray(value) && value.length > 0) {
+                  // 附件字段已有数据，但不预填充文件，用户仍需上传
+                  // 可以在这里添加提示信息
+                }
+              } else {
+                // 文本、数字、日期、单选等：直接赋值
+                formData.value[field.field_id] = value !== null && value !== undefined ? String(value) : ''
+              }
+              filledCount++
+            } else {
+              console.log(`[SignPage] 字段 ${field.field_id} (${field.label}) 在记录数据中不存在`)
+            }
+          })
+          
+          console.log(`[SignPage] 预填充完成，共填充 ${filledCount} 个字段`)
+          console.log('[SignPage] 最终表单数据:', formData.value)
+        } else {
+          console.warn('[SignPage] 记录数据格式不正确:', recordDataResult)
+        }
+      } catch (e) {
+        console.error('[SignPage] 预填充数据失败:', e)
+        console.error('[SignPage] 错误详情:', e.response?.data || e.message)
+        console.error('[SignPage] 错误堆栈:', e.stack)
+        // 显示错误提示给用户
+        const errorMsg = e.response?.data?.detail || e.message || '加载记录数据失败'
+        showToast(`预填充数据失败: ${errorMsg}`, 'warning')
+        // 预填充失败不影响表单正常使用，只记录警告
+      }
+    } else {
+      console.log('[SignPage] 未启用显示数据功能，跳过预填充')
+    }
+    
     loading.value = false
     
     await nextTick()
@@ -378,7 +450,6 @@ function initCanvas() {
   // 使用 requestAnimationFrame 确保 DOM 完全渲染后再初始化
   const tryInitCanvas = (attempt = 0) => {
     if (attempt > 10) {
-      console.warn('Canvas initialization failed after 10 attempts')
       return
     }
     
@@ -388,7 +459,6 @@ function initCanvas() {
     
     if (!cvs || !container) {
       // 如果 canvas 还不存在，可能是因为默认进入了上传模式，跳过
-      console.log('Canvas not found, will retry if mode switches to signature')
       return
     }
     
@@ -416,7 +486,7 @@ function initCanvas() {
     ctx.fillStyle = '#fff'
     ctx.fillRect(0, 0, cvs.width, cvs.height)
     
-    console.log('Canvas initialized successfully:', cvs.width, 'x', cvs.height)
+
   }
   
   // 延迟初始化

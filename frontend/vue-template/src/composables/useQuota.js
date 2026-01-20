@@ -13,6 +13,7 @@ const quota = ref({
     totalUsed: 0,
     inviteActive: false,
     inviteExpireAt: null,
+    planExpiresAt: null,   // 套餐到期时间
 })
 
 // 计算属性：是否可以签名
@@ -35,6 +36,7 @@ async function loadQuota(openId, tenantKey) {
             totalUsed: data.total_used || 0,
             inviteActive: data.invite_active || false,
             inviteExpireAt: data.invite_expire_at || null,
+            planExpiresAt: data.plan_expires_at || null,  // 套餐到期时间
         }
     } catch (e) {
         console.warn('[Quota] Failed to load quota:', e)

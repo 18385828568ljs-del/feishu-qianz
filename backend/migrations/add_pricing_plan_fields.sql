@@ -46,3 +46,9 @@ COMMENT '签名次数（NULL表示不限次数）';
 -- AND TABLE_NAME = 'pricing_plans' 
 -- AND COLUMN_NAME = 'billing_type';
 
+
+
+
+
+
+

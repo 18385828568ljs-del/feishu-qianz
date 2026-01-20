@@ -15,6 +15,10 @@ const props = defineProps({
   userInfo: {
     type: Object,
     default: () => ({ openId: '', tenantKey: '' })
+  },
+  quotaInfo: {
+    type: Object,
+    default: () => ({ planExpiresAt: null })
   }
 })
 
@@ -98,10 +102,35 @@ function selectPlan(plan) {
   selectedPlan.value = plan
 }
 
+// 格式化到期时间
+function formatExpireDate(timestamp) {
+  if (!timestamp) return ''
+  const date = new Date(timestamp * 1000)
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}年${month}月${day}日`
+}
+
 // 格式化价格（分转元）
 function formatPrice(priceInCents) {
   if (!priceInCents) return '0.00'
   return (priceInCents / 100).toFixed(2)
+}
+
+// 获取套餐的显示价格（优先使用 monthly_price/yearly_price，否则使用 price）
+function getPlanPrice(plan) {
+  if (!plan) return 0
+  // 如果是月付套餐，优先使用 monthly_price
+  if (plan.billing_type === 'monthly' && plan.monthly_price !== null && plan.monthly_price !== undefined) {
+    return plan.monthly_price
+  }
+  // 如果是年付套餐，优先使用 yearly_price
+  if (plan.billing_type === 'yearly' && plan.yearly_price !== null && plan.yearly_price !== undefined) {
+    return plan.yearly_price
+  }
+  // 否则使用 price
+  return plan.price || 0
 }
 
 // 获取套餐显示名称
@@ -154,7 +183,10 @@ async function startAlipayPayment() {
     }
 
     // 显示二维码
+    // 如果后端返回的是 base64 (以 data: 开头)，直接显示
+    // 否则直接使用 result.qr_code（对应 type=2 的直接图片链接）
     qrCodeUrl.value = result.qr_code
+    
     currentOrderId.value = result.order_id
     showPayment.value = true
 
@@ -281,6 +313,10 @@ onUnmounted(() => {
           </svg>
         </button>
       </div>
+      <!-- 到期时间提示 -->
+      <div v-if="!showPayment && quotaInfo?.planExpiresAt" class="expire-hint">
+        当前套餐到期时间：{{ formatExpireDate(quotaInfo.planExpiresAt) }}
+      </div>
     </template>
     
     <div class="dialog-content">
@@ -289,7 +325,7 @@ onUnmounted(() => {
         <div class="payment-info">
           <div class="plan-summary">
             <span class="plan-label">{{ selectedPlan?.name }}</span>
-            <span class="plan-price">¥{{ formatPrice(selectedPlan?.price) }}</span>
+            <span class="plan-price">¥{{ formatPrice(getPlanPrice(selectedPlan)) }}</span>
           </div>
           
           <!-- 二维码 -->
@@ -359,7 +395,7 @@ onUnmounted(() => {
                 </div>
                 <div class="plan-price">
                   <span class="price-symbol">¥</span>
-                  <span class="price-amount">{{ formatPrice(group.monthly.price) }}</span>
+                  <span class="price-amount">{{ formatPrice(getPlanPrice(group.monthly)) }}</span>
                   <span class="price-unit">/月</span>
                 </div>
               </div>
@@ -387,7 +423,7 @@ onUnmounted(() => {
                 </div>
                 <div class="plan-price">
                   <span class="price-symbol">¥</span>
-                  <span class="price-amount">{{ formatPrice(group.yearly.price) }}</span>
+                  <span class="price-amount">{{ formatPrice(getPlanPrice(group.yearly)) }}</span>
                   <span class="price-unit">/年</span>
                 </div>
                 <div v-if="group.yearly.save_percent" class="save-badge">
@@ -412,7 +448,7 @@ onUnmounted(() => {
               <path d="M789.12 595.584c-64.256-27.776-132.224-55.68-185.728-77.952 21.632-52.992 37.568-112.64 41.216-157.056H471.68v-56.32h197.504V272.64H471.68V192h-82.304v80.64H192.128v31.616h197.248v56.32H206.848v31.616h341.888c-5.12 35.584-16.512 80.64-33.92 121.344-72.064-26.24-159.616-55.04-252.288-76.16l-15.616 32.256c169.984 38.912 335.104 94.592 478.208 158.848C648.96 756.48 517.888 832 358.784 832c-148.608 0-271.872-65.408-271.872-186.88 0-73.088 52.864-137.472 134.528-179.84l-22.656-28.8C92.16 486.656 0 571.264 0 680.32 0 841.6 159.744 960 375.04 960c206.592 0 371.456-99.072 463.36-267.136 60.032 30.976 109.696 60.16 144.512 85.376L1024 746.88c-52.352-35.968-133.504-87.936-234.88-151.296z"/>
             </svg>
             <span v-if="creatingOrder">创建订单中...</span>
-            <span v-else-if="selectedPlan">支付宝支付 ¥{{ formatPrice(selectedPlan.price) }}</span>
+            <span v-else-if="selectedPlan">支付宝支付 ¥{{ formatPrice(getPlanPrice(selectedPlan)) }}</span>
             <span v-else>请选择套餐</span>
           </el-button>
         </div>
@@ -628,6 +664,16 @@ onUnmounted(() => {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* 到期时间提示 */
+.expire-hint {
+  text-align: center;
+  font-size: 13px;
+  color: #8f959e;
+  padding: 8px 16px 12px;
+  margin: 0;
+  border-bottom: 1px solid #f0f0f0;
 }
 
 /* 套餐列表 */

@@ -328,6 +328,7 @@ onUnmounted(() => {
     <RechargeDialog 
       v-model="showRechargeDialog"
       :user-info="userInfo"
+      :quota-info="quota"
       @close="onDialogClose"
       @success="refreshQuota"
       @toast="handleToast"
