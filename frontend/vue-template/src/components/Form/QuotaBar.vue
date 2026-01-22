@@ -69,7 +69,7 @@ const progressColor = computed(() => {
       <div class="quota-header">
         <span class="quota-label">剩余额度</span>
         <span v-if="quota.planExpiresAt" class="expire-center">{{ formatDate(quota.planExpiresAt) }} 到期</span>
-        <span class="quota-count">{{ quota.remaining }} / {{ quota.planQuota || 10 }}</span>
+        <span class="quota-count">{{ quota.remaining }}</span>
       </div>
       <div class="quota-progress-bar">
         <div 

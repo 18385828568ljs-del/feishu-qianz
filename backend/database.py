@@ -1,6 +1,10 @@
 """
 MySQL 数据库配置和模型定义
 使用 SQLAlchemy ORM
+
+架构说明：
+- 主库 (feishu_master): 存储用户元信息和全局套餐配置
+- 用户库 (feishu_user_<hash>): 每个用户独立数据库，存储用户私有数据
 """
 import os
 from datetime import datetime
@@ -20,17 +24,132 @@ MYSQL_USER = os.getenv("MYSQL_USER", "root")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
 MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "feishu")
 
-# 构建数据库URL
+# 构建数据库URL（兼容旧逻辑，新架构使用 user_db_manager）
 DATABASE_URL = f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}?charset=utf8mb4"
 
-# 创建引擎
+# 创建引擎（兼容旧逻辑）
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, echo=False)
 
-# 创建会话工厂
+# 创建会话工厂（兼容旧逻辑）
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# 声明基类
+# 声明基类（兼容旧逻辑，用于旧的共享数据库）
 Base = declarative_base()
+
+# ========== 用户库专用模型 ==========
+# 这些模型用于用户独立数据库，不包含 user_key 字段（因为整个库属于单个用户）
+UserBase = declarative_base()
+
+
+class UserProfile(UserBase):
+    """用户配置表（用户库专用，每个用户库一条记录）"""
+    __tablename__ = "user_profile"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    open_id = Column(String(128), nullable=False)
+    tenant_key = Column(String(128), nullable=False)
+    
+    # 配额相关
+    remaining_quota = Column(Integer, default=20, nullable=False)  # 剩余次数
+    total_used = Column(Integer, default=0, nullable=False)  # 总使用次数
+    
+    # 套餐订阅相关
+    current_plan_id = Column(String(32), nullable=True)
+    plan_expires_at = Column(DateTime, nullable=True)
+    plan_quota_reset_at = Column(DateTime, nullable=True)
+    is_unlimited = Column(Boolean, default=False, nullable=False)
+    
+    # 邀请码相关
+    invite_code_used = Column(String(64), nullable=True)
+    invite_expire_at = Column(DateTime, nullable=True)
+    
+    # 付费相关
+    total_paid = Column(Integer, default=0, nullable=False)
+    
+    # 时间戳
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class UserInviteCode(UserBase):
+    """邀请码表（用户库专用）"""
+    __tablename__ = "invite_codes"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(64), unique=True, nullable=False, index=True)
+    max_usage = Column(Integer, default=10, nullable=False)
+    used_count = Column(Integer, default=0, nullable=False)
+    expires_at = Column(DateTime, nullable=True)
+    benefit_days = Column(Integer, default=365, nullable=False)
+    created_by = Column(String(128), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class UserOrder(UserBase):
+    """订单表（用户库专用）"""
+    __tablename__ = "orders"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    order_id = Column(String(64), unique=True, nullable=False, index=True)
+    plan_id = Column(String(32), nullable=False)
+    quota_count = Column(Integer, nullable=True)
+    amount = Column(Integer, nullable=False)
+    payment_method = Column(String(32), default="mock", nullable=False)
+    status = Column(String(16), default="pending", nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    paid_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+
+
+class UserSignatureLog(UserBase):
+    """签名记录表（用户库专用）"""
+    __tablename__ = "signature_logs"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    file_token = Column(String(128), nullable=True)
+    file_name = Column(String(256), nullable=True)
+    local_path = Column(Text, nullable=True)
+    quota_consumed = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class UserSignForm(UserBase):
+    """外部签名表单配置表（用户库专用）"""
+    __tablename__ = "sign_forms"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    form_id = Column(String(32), unique=True, nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    description = Column(Text, nullable=True)
+    app_token = Column(String(64), nullable=False)
+    table_id = Column(String(64), nullable=False)
+    signature_field_id = Column(String(64), nullable=False)
+    extra_fields = Column(Text, nullable=True)
+    creator_session_id = Column(String(64), nullable=True)
+    creator_refresh_token = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    expires_at = Column(DateTime, nullable=True)
+    record_index = Column(Integer, default=1, nullable=False)
+    show_data = Column(Boolean, default=False, nullable=False)
+    submit_count = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class UserOAuthSession(UserBase):
+    """OAuth Session 存储表（用户库专用）"""
+    __tablename__ = "oauth_sessions"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String(128), unique=True, nullable=False, index=True)
+    session_data = Column(Text, nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+# ========== 以下为兼容旧逻辑的共享库模型 ==========
 
 
 class User(Base):

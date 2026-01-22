@@ -22,49 +22,89 @@ from database import get_db, User, InviteCode, Order, SignatureLog, SignForm, Pr
 # 密码文件路径
 PASSWORD_FILE = os.path.join(os.path.dirname(__file__), "admin_password.json")
 
-# 默认密码（从环境变量获取，优先使用文件存储的密码）
+# 默认账号密码（从环境变量获取，优先使用文件存储）
+DEFAULT_ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 DEFAULT_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 
 
-def get_admin_password() -> str:
-    """获取当前管理员密码（优先从文件读取）"""
+def _read_admin_credentials_from_file():
     if os.path.exists(PASSWORD_FILE):
         try:
             with open(PASSWORD_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return data.get("password", DEFAULT_PASSWORD)
-        except:
-            pass
-    return DEFAULT_PASSWORD
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+    return {}
 
 
-def save_admin_password(new_password: str) -> bool:
-    """保存新密码到文件"""
+def get_admin_username() -> str:
+    """获取当前管理员账号（优先从文件读取）"""
+    data = _read_admin_credentials_from_file()
+    return data.get("username") or DEFAULT_ADMIN_USERNAME
+
+
+def get_admin_password() -> str:
+    """获取当前管理员密码（优先从文件读取）"""
+    data = _read_admin_credentials_from_file()
+    return data.get("password", DEFAULT_PASSWORD)
+
+
+def save_admin_credentials(new_username: str, new_password: str) -> bool:
+    """保存新账号/密码到文件"""
     try:
         with open(PASSWORD_FILE, "w", encoding="utf-8") as f:
-            json.dump({"password": new_password, "updated_at": datetime.now().isoformat()}, f)
+            json.dump(
+                {
+                    "username": new_username,
+                    "password": new_password,
+                    "updated_at": datetime.now().isoformat(),
+                },
+                f,
+                ensure_ascii=False,
+            )
         return True
     except Exception as e:
-        print(f"保存密码失败: {e}")
+        print(f"保存账号密码失败: {e}")
         return False
 
 
 router = APIRouter(
     prefix="/admin",
     tags=["管理后台"],
-    responses={401: {"description": "未授权"}}
+    responses={401: {"description": "未授权"}},
 )
 
 
 # ==================== 认证 ====================
 
-def verify_admin(x_admin_token: str = Header(None), token: str = Query(None)):
-    """验证管理员身份（简单密码认证）"""
+def verify_admin(
+    x_admin_username: str = Header(None),
+    x_admin_token: str = Header(None),
+    token: str = Query(None),
+):
+    """验证管理员身份
+
+    - 新方式：Header 同时带上 X-Admin-Username + X-Admin-Token
+    - 兼容旧方式：Header X-Admin-Token 或 Query token（仅密码）
+    """
     current_password = get_admin_password()
-    # 同时支持从 Header (X-Admin-Token) 或 Query 参数 (token) 验证
-    actual_token = x_admin_token or token
-    if actual_token != current_password:
+    current_username = get_admin_username()
+
+    # 旧兼容：只校验密码
+    if x_admin_username is None:
+        actual_token = x_admin_token or token
+        if actual_token != current_password:
+            raise HTTPException(status_code=401, detail="管理员认证失败")
+        return True
+
+    # 新方式：账号+密码
+    if x_admin_username != current_username:
         raise HTTPException(status_code=401, detail="管理员认证失败")
+
+    if x_admin_token != current_password:
+        raise HTTPException(status_code=401, detail="管理员认证失败")
+
     return True
 
 
@@ -72,6 +112,7 @@ def verify_admin(x_admin_token: str = Header(None), token: str = Query(None)):
 
 class ChangePasswordRequest(BaseModel):
     """修改密码请求"""
+
     old_password: str
     new_password: str
 
@@ -80,29 +121,56 @@ class ChangePasswordRequest(BaseModel):
 def change_password(req: ChangePasswordRequest, _: bool = Depends(verify_admin)):
     """修改管理员密码"""
     current_password = get_admin_password()
-    
-    # 验证旧密码
+
     if req.old_password != current_password:
         raise HTTPException(status_code=400, detail="旧密码错误")
-    
-    # 验证新密码
+
     if len(req.new_password) < 6:
         raise HTTPException(status_code=400, detail="新密码至少6位")
-    
+
     if req.new_password == req.old_password:
         raise HTTPException(status_code=400, detail="新密码不能与旧密码相同")
-    
-    # 保存新密码
-    if save_admin_password(req.new_password):
+
+    if save_admin_credentials(get_admin_username(), req.new_password):
         return {"success": True, "message": "密码修改成功"}
     else:
         raise HTTPException(status_code=500, detail="密码保存失败")
+
+
+class ChangeCredentialsRequest(BaseModel):
+    """修改账号密码请求"""
+
+    old_username: str
+    old_password: str
+    new_username: str
+    new_password: str
+
+
+@router.put("/credentials", summary="修改账号密码")
+def change_credentials(req: ChangeCredentialsRequest, _: bool = Depends(verify_admin)):
+    current_username = get_admin_username()
+    current_password = get_admin_password()
+
+    if req.old_username != current_username or req.old_password != current_password:
+        raise HTTPException(status_code=400, detail="旧账号或密码错误")
+
+    if len(req.new_username) < 3:
+        raise HTTPException(status_code=400, detail="新账号至少3位")
+
+    if len(req.new_password) < 6:
+        raise HTTPException(status_code=400, detail="新密码至少6位")
+
+    if save_admin_credentials(req.new_username, req.new_password):
+        return {"success": True, "message": "账号密码修改成功"}
+    else:
+        raise HTTPException(status_code=500, detail="账号密码保存失败")
 
 
 # ==================== 响应模型 ====================
 
 class DashboardStats(BaseModel):
     """仪表盘统计数据"""
+
     total_users: int
     new_users_today: int
     total_signatures: int
@@ -117,6 +185,7 @@ class DashboardStats(BaseModel):
 
 class UserItem(BaseModel):
     """用户列表项"""
+
     id: int
     open_id: str
     tenant_key: str
@@ -130,6 +199,7 @@ class UserItem(BaseModel):
 
 class FormItem(BaseModel):
     """表单列表项"""
+
     id: int
     form_id: str
     name: str
@@ -142,6 +212,7 @@ class FormItem(BaseModel):
 
 class InviteItem(BaseModel):
     """邀请码列表项"""
+
     id: int
     code: str
     max_usage: int
@@ -149,12 +220,13 @@ class InviteItem(BaseModel):
     benefit_days: int
     expires_at: Optional[datetime]
     is_active: bool
-    created_by: Optional[str]
+    created_by: str
     created_at: datetime
 
 
 class LogItem(BaseModel):
     """签名日志项"""
+
     id: int
     user_key: str
     file_name: Optional[str]
@@ -165,11 +237,13 @@ class LogItem(BaseModel):
 
 class UpdateQuotaRequest(BaseModel):
     """更新配额请求"""
+
     remaining_quota: int
 
 
 class CreateInviteRequest(BaseModel):
     """创建邀请码请求"""
+
     max_usage: int = 10
     benefit_days: int = 365
     expires_in_days: int = 30
@@ -181,30 +255,32 @@ class CreateInviteRequest(BaseModel):
 def get_dashboard(db: Session = Depends(get_db), _: bool = Depends(verify_admin)):
     """获取仪表盘统计数据"""
     today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    
+
     # 用户统计
     total_users = db.query(User).count()
     new_users_today = db.query(User).filter(User.created_at >= today).count()
-    
+
     # 签名统计
     total_signatures = db.query(SignatureLog).count()
     signatures_today = db.query(SignatureLog).filter(SignatureLog.created_at >= today).count()
-    
+
     # 表单统计
     active_forms = db.query(SignForm).filter(SignForm.is_active == True).count()
     total_form_submissions = db.query(func.sum(SignForm.submit_count)).scalar() or 0
-    
+
     # 邀请码统计
     total_invites = db.query(InviteCode).count()
     active_invites = db.query(InviteCode).filter(InviteCode.is_active == True).count()
-    
+
     # 收入统计（只统计已支付的订单）
     total_income = db.query(func.sum(Order.amount)).filter(Order.status == "paid").scalar() or 0
-    income_today = db.query(func.sum(Order.amount)).filter(
-        Order.status == "paid",
-        Order.paid_at >= today
-    ).scalar() or 0
-    
+    income_today = (
+        db.query(func.sum(Order.amount))
+        .filter(Order.status == "paid", Order.paid_at >= today)
+        .scalar()
+        or 0
+    )
+
     return DashboardStats(
         total_users=total_users,
         new_users_today=new_users_today,
@@ -215,7 +291,7 @@ def get_dashboard(db: Session = Depends(get_db), _: bool = Depends(verify_admin)
         total_invites=total_invites,
         active_invites=active_invites,
         total_income=total_income,
-        income_today=income_today
+        income_today=income_today,
     )
 
 
@@ -223,66 +299,58 @@ def get_dashboard(db: Session = Depends(get_db), _: bool = Depends(verify_admin)
 def get_dashboard_trends(
     period: str = Query("week", description="时间周期: week(本周) 或 month(本月)"),
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
+    _: bool = Depends(verify_admin),
 ):
-    """
-    获取仪表盘趋势数据，用于图表展示
-    
+    """获取仪表盘趋势数据，用于图表展示
+
     返回按日期分组的用户数和签名次数
     """
     from sqlalchemy import cast, Date
-    
+
     # 计算起始日期
     today = datetime.utcnow().date()
     if period == "month":
-        # 本月: 过去30天
         start_date = today - timedelta(days=29)
     else:
-        # 本周: 过去7天
         start_date = today - timedelta(days=6)
-    
-    # 生成日期范围
+
     date_range = []
     current = start_date
     while current <= today:
         date_range.append(current.isoformat())
         current += timedelta(days=1)
-    
-    # 按日期统计用户数
+
     user_counts = {}
-    user_results = db.query(
-        cast(User.created_at, Date).label('date'),
-        func.count(User.id).label('count')
-    ).filter(
-        User.created_at >= datetime.combine(start_date, datetime.min.time())
-    ).group_by(cast(User.created_at, Date)).all()
-    
+    user_results = (
+        db.query(cast(User.created_at, Date).label("date"), func.count(User.id).label("count"))
+        .filter(User.created_at >= datetime.combine(start_date, datetime.min.time()))
+        .group_by(cast(User.created_at, Date))
+        .all()
+    )
+
     for row in user_results:
-        date_str = row.date.isoformat() if hasattr(row.date, 'isoformat') else str(row.date)
+        date_str = row.date.isoformat() if hasattr(row.date, "isoformat") else str(row.date)
         user_counts[date_str] = row.count
-    
-    # 按日期统计签名次数
+
     sig_counts = {}
-    sig_results = db.query(
-        cast(SignatureLog.created_at, Date).label('date'),
-        func.count(SignatureLog.id).label('count')
-    ).filter(
-        SignatureLog.created_at >= datetime.combine(start_date, datetime.min.time())
-    ).group_by(cast(SignatureLog.created_at, Date)).all()
-    
+    sig_results = (
+        db.query(
+            cast(SignatureLog.created_at, Date).label("date"),
+            func.count(SignatureLog.id).label("count"),
+        )
+        .filter(SignatureLog.created_at >= datetime.combine(start_date, datetime.min.time()))
+        .group_by(cast(SignatureLog.created_at, Date))
+        .all()
+    )
+
     for row in sig_results:
-        date_str = row.date.isoformat() if hasattr(row.date, 'isoformat') else str(row.date)
+        date_str = row.date.isoformat() if hasattr(row.date, "isoformat") else str(row.date)
         sig_counts[date_str] = row.count
-    
-    # 填充数据(缺失日期补0)
+
     users_data = [user_counts.get(d, 0) for d in date_range]
     signatures_data = [sig_counts.get(d, 0) for d in date_range]
-    
-    return {
-        "dates": date_range,
-        "users": users_data,
-        "signatures": signatures_data
-    }
+
+    return {"dates": date_range, "users": users_data, "signatures": signatures_data}
 
 
 # ==================== 用户管理 API ====================
@@ -293,32 +361,40 @@ def list_users(
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
+    _: bool = Depends(verify_admin),
 ):
     """获取用户列表（分页）"""
     query = db.query(User)
-    
+
     if search:
         query = query.filter(User.open_id.contains(search))
-    
+
     total = query.count()
-    users = query.order_by(desc(User.created_at)).offset((page - 1) * page_size).limit(page_size).all()
-    
+    users = (
+        query.order_by(desc(User.created_at))
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
-        "items": [{
-            "id": u.id,
-            "open_id": u.open_id,
-            "tenant_key": u.tenant_key,
-            "remaining_quota": u.remaining_quota,
-            "total_used": u.total_used,
-            "invite_code_used": u.invite_code_used,
-            "invite_expire_at": u.invite_expire_at.isoformat() if u.invite_expire_at else None,
-            "total_paid": u.total_paid,
-            "created_at": u.created_at.isoformat()
-        } for u in users]
+        "items": [
+            {
+                "id": u.id,
+                "open_id": u.open_id,
+                "tenant_key": u.tenant_key,
+                "remaining_quota": u.remaining_quota,
+                "total_used": u.total_used,
+                "invite_code_used": u.invite_code_used,
+                "invite_expire_at": u.invite_expire_at.isoformat() if u.invite_expire_at else None,
+                "total_paid": u.total_paid,
+                "created_at": u.created_at.isoformat(),
+            }
+            for u in users
+        ],
     }
 
 
@@ -327,16 +403,16 @@ def update_user_quota(
     user_id: int,
     req: UpdateQuotaRequest,
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
+    _: bool = Depends(verify_admin),
 ):
     """调整用户配额"""
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
-    
+
     user.remaining_quota = req.remaining_quota
     db.commit()
-    
+
     return {"success": True, "remaining_quota": user.remaining_quota}
 
 
@@ -344,13 +420,13 @@ def update_user_quota(
 def delete_user(
     user_id: int,
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
+    _: bool = Depends(verify_admin),
 ):
     """删除用户及其关联记录"""
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
-    
+
     db.delete(user)
     db.commit()
     return {"success": True, "message": "用户已删除"}
@@ -360,45 +436,39 @@ def delete_user(
 def clear_user_invite(
     user_id: int,
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
+    _: bool = Depends(verify_admin),
 ):
     """清理用户的邀请码使用记录"""
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
-    
+
     if not user.invite_code_used:
         return {"success": True, "message": "用户未使用过邀请码", "invite_code": None}
-    
-    # 记录使用的邀请码
+
     invite_code_str = user.invite_code_used
-    
-    # 清除用户的邀请码记录
+
     user.invite_code_used = None
     user.invite_expire_at = None
-    
-    # 减少邀请码的使用计数
+
     invite = db.query(InviteCode).filter(InviteCode.code == invite_code_str).first()
     if invite and invite.used_count > 0:
         invite.used_count -= 1
-    
+
     db.commit()
-    
+
     return {
         "success": True,
         "message": "邀请码记录已清理",
         "invite_code": invite_code_str,
-        "used_count_decreased": invite.used_count if invite else None
+        "used_count_decreased": invite.used_count if invite else None,
     }
 
 
 @router.get("/users/export", summary="导出用户 CSV")
-def export_users(
-    db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
-):
+def export_users(db: Session = Depends(get_db), _: bool = Depends(verify_admin)):
     users = db.query(User).all()
-    
+
     try:
         import openpyxl
         from openpyxl.utils import get_column_letter
@@ -408,29 +478,39 @@ def export_users(
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "用户列表"
-    
+
     headers = ["ID", "OpenID", "租户Key", "免费次数", "已使用", "邀请码", "VIP到期时间", "累计付费", "注册时间"]
     ws.append(headers)
-    
+
     for u in users:
-        ws.append([
-            u.id, u.open_id, u.tenant_key, u.remaining_quota, u.total_used, 
-            u.invite_code_used or "-",
-            u.invite_expire_at.isoformat() if u.invite_expire_at else "无",
-            u.total_paid / 100.0,
-            u.created_at.isoformat()
-        ])
-    
-    # 自动调整列宽
+        ws.append(
+            [
+                u.id,
+                u.open_id,
+                u.tenant_key,
+                u.remaining_quota,
+                u.total_used,
+                u.invite_code_used or "-",
+                u.invite_expire_at.isoformat() if u.invite_expire_at else "无",
+                u.total_paid / 100.0,
+                u.created_at.isoformat(),
+            ]
+        )
+
     for i, _ in enumerate(headers, 1):
         ws.column_dimensions[get_column_letter(i)].width = 20
 
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
-    
-    response = StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    response.headers["Content-Disposition"] = f"attachment; filename=users_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
+
+    response = StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response.headers["Content-Disposition"] = (
+        f"attachment; filename=users_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
+    )
     return response
 
 
@@ -442,31 +522,39 @@ def list_forms(
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
+    _: bool = Depends(verify_admin),
 ):
     """获取表单列表（分页）"""
     query = db.query(SignForm)
-    
+
     if search:
         query = query.filter(SignForm.name.contains(search))
-    
+
     total = query.count()
-    forms = query.order_by(desc(SignForm.created_at)).offset((page - 1) * page_size).limit(page_size).all()
-    
+    forms = (
+        query.order_by(desc(SignForm.created_at))
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
-        "items": [{
-            "id": f.id,
-            "form_id": f.form_id,
-            "name": f.name,
-            "description": f.description,
-            "submit_count": f.submit_count,
-            "is_active": f.is_active,
-            "created_by": f.created_by,
-            "created_at": f.created_at.isoformat()
-        } for f in forms]
+        "items": [
+            {
+                "id": f.id,
+                "form_id": f.form_id,
+                "name": f.name,
+                "description": f.description,
+                "submit_count": f.submit_count,
+                "is_active": f.is_active,
+                "created_by": f.created_by,
+                "created_at": f.created_at.isoformat(),
+            }
+            for f in forms
+        ],
     }
 
 
@@ -475,16 +563,16 @@ def update_form_status(
     form_id: str,
     is_active: bool = Query(...),
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
+    _: bool = Depends(verify_admin),
 ):
     """启用或禁用表单"""
     form = db.query(SignForm).filter(SignForm.form_id == form_id).first()
     if not form:
         raise HTTPException(status_code=404, detail="表单不存在")
-    
+
     form.is_active = is_active
     db.commit()
-    
+
     return {"success": True, "is_active": form.is_active}
 
 
@@ -492,16 +580,16 @@ def update_form_status(
 def delete_form(
     form_id: str,
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
+    _: bool = Depends(verify_admin),
 ):
     """永久删除外部签名表单"""
     form = db.query(SignForm).filter(SignForm.form_id == form_id).first()
     if not form:
         raise HTTPException(status_code=404, detail="表单不存在")
-    
+
     db.delete(form)
     db.commit()
-    
+
     return {"success": True, "message": "表单已删除"}
 
 
@@ -512,86 +600,79 @@ def list_invites(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
+    _: bool = Depends(verify_admin),
 ):
     """获取邀请码列表（分页）"""
     query = db.query(InviteCode)
-    
+
     total = query.count()
-    invites = query.order_by(desc(InviteCode.created_at)).offset((page - 1) * page_size).limit(page_size).all()
-    
+    invites = (
+        query.order_by(desc(InviteCode.created_at))
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
-        "items": [{
-            "id": i.id,
-            "code": i.code,
-            "max_usage": i.max_usage,
-            "used_count": i.used_count,
-            "benefit_days": i.benefit_days,
-            "expires_at": i.expires_at.isoformat() if i.expires_at else None,
-            "is_active": i.is_active,
-            "created_by": i.created_by,
-            "created_at": i.created_at.isoformat()
-        } for i in invites]
+        "items": [
+            {
+                "id": i.id,
+                "code": i.code,
+                "max_usage": i.max_usage,
+                "used_count": i.used_count,
+                "benefit_days": i.benefit_days,
+                "expires_at": i.expires_at.isoformat() if i.expires_at else None,
+                "is_active": i.is_active,
+                "created_by": i.created_by,
+                "created_at": i.created_at.isoformat(),
+            }
+            for i in invites
+        ],
     }
 
 
 @router.post("/invites", summary="创建邀请码")
-def create_invite(
-    req: CreateInviteRequest,
-    db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
-):
+def create_invite(req: CreateInviteRequest, db: Session = Depends(get_db), _: bool = Depends(verify_admin)):
     """创建新邀请码"""
     import uuid
-    
+
     code = f"INV-{uuid.uuid4().hex[:8].upper()}"
     expires_at = datetime.utcnow() + timedelta(days=req.expires_in_days) if req.expires_in_days else None
-    
+
     invite = InviteCode(
         code=code,
         max_usage=req.max_usage,
         benefit_days=req.benefit_days,
         expires_at=expires_at,
-        created_by="admin"
+        created_by="admin",
     )
     db.add(invite)
     db.commit()
     db.refresh(invite)
-    
-    return {
-        "success": True,
-        "code": code,
-        "expires_at": expires_at.isoformat() if expires_at else None
-    }
+
+    return {"success": True, "code": code, "expires_at": expires_at.isoformat() if expires_at else None}
 
 
 @router.delete("/invites/{invite_id}", summary="删除邀请码")
-def delete_invite(
-    invite_id: int,
-    db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
-):
+def delete_invite(invite_id: int, db: Session = Depends(get_db), _: bool = Depends(verify_admin)):
     """删除邀请码"""
     invite = db.query(InviteCode).filter(InviteCode.id == invite_id).first()
     if not invite:
         raise HTTPException(status_code=404, detail="邀请码不存在")
-    
+
     db.delete(invite)
     db.commit()
     return {"success": True, "message": "邀请码已删除"}
 
 
 @router.get("/invites/export", summary="导出邀请码 CSV")
-def export_invites(
-    db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
-):
+def export_invites(db: Session = Depends(get_db), _: bool = Depends(verify_admin)):
     """导出所有邀请码为 CSV"""
     invites = db.query(InviteCode).all()
-    
+
     try:
         import openpyxl
         from openpyxl.utils import get_column_letter
@@ -601,28 +682,39 @@ def export_invites(
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "邀请码列表"
-    
+
     headers = ["ID", "邀请码", "最大使用", "已使用", "权益天数", "领取截止日期", "状态", "创建人", "创建时间"]
     ws.append(headers)
-    
+
     for i in invites:
-        ws.append([
-            i.id, i.code, i.max_usage, i.used_count, i.benefit_days,
-            i.expires_at.isoformat() if i.expires_at else "永久",
-            "有效" if i.is_active else "禁用",
-            i.created_by,
-            i.created_at.isoformat()
-        ])
-        
+        ws.append(
+            [
+                i.id,
+                i.code,
+                i.max_usage,
+                i.used_count,
+                i.benefit_days,
+                i.expires_at.isoformat() if i.expires_at else "永久",
+                "有效" if i.is_active else "禁用",
+                i.created_by,
+                i.created_at.isoformat(),
+            ]
+        )
+
     for idx, _ in enumerate(headers, 1):
         ws.column_dimensions[get_column_letter(idx)].width = 15
 
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
-    
-    response = StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    response.headers["Content-Disposition"] = f"attachment; filename=invites_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
+
+    response = StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response.headers["Content-Disposition"] = (
+        f"attachment; filename=invites_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
+    )
     return response
 
 
@@ -632,38 +724,27 @@ def update_invite_status(
     is_active: bool = Query(...),
     revoke_benefits: bool = Query(False, description="禁用时是否撤销已兑换用户的权益"),
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
+    _: bool = Depends(verify_admin),
 ):
-    """
-    启用或禁用邀请码
-    
-    - is_active: 是否启用
-    - revoke_benefits: 禁用时是否撤销已兑换用户的 VIP 权益（清除 invite_expire_at）
-    """
+    """启用或禁用邀请码"""
     invite = db.query(InviteCode).filter(InviteCode.id == invite_id).first()
     if not invite:
         raise HTTPException(status_code=404, detail="邀请码不存在")
-    
+
     invite.is_active = is_active
-    
+
     revoked_count = 0
-    
-    # 如果禁用且需要撤销权益
+
     if not is_active and revoke_benefits:
-        # 查找所有使用过这个邀请码的用户
         affected_users = db.query(User).filter(User.invite_code_used == invite.code).all()
         for user in affected_users:
             if user.invite_expire_at:
-                user.invite_expire_at = None  # 清除 VIP 到期时间
+                user.invite_expire_at = None
                 revoked_count += 1
-    
+
     db.commit()
-    
-    return {
-        "success": True, 
-        "is_active": invite.is_active,
-        "revoked_count": revoked_count  # 返回被撤销权益的用户数
-    }
+
+    return {"success": True, "is_active": invite.is_active, "revoked_count": revoked_count}
 
 
 # ==================== 签名日志 API ====================
@@ -676,129 +757,52 @@ def list_logs(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
+    _: bool = Depends(verify_admin),
 ):
     """获取签名日志列表（分页）"""
     query = db.query(SignatureLog)
-    
+
     if user_key:
         query = query.filter(SignatureLog.user_key.contains(user_key))
-    
+
     if start_date:
         try:
             start = datetime.fromisoformat(start_date)
             query = query.filter(SignatureLog.created_at >= start)
-        except:
+        except Exception:
             pass
-    
+
     if end_date:
         try:
             end = datetime.fromisoformat(end_date)
             query = query.filter(SignatureLog.created_at <= end)
-        except:
+        except Exception:
             pass
-    
+
     total = query.count()
-    logs = query.order_by(desc(SignatureLog.created_at)).offset((page - 1) * page_size).limit(page_size).all()
-    
+    logs = (
+        query.order_by(desc(SignatureLog.created_at))
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
-        "items": [{
-            "id": l.id,
-            "user_key": l.user_key,
-            "file_name": l.file_name,
-            "file_token": l.file_token,
-            "quota_consumed": l.quota_consumed,
-            "created_at": l.created_at.isoformat()
-        } for l in logs]
+        "items": [
+            {
+                "id": l.id,
+                "user_key": l.user_key,
+                "file_name": l.file_name,
+                "file_token": l.file_token,
+                "quota_consumed": l.quota_consumed,
+                "created_at": l.created_at.isoformat(),
+            }
+            for l in logs
+        ],
     }
-
-
-@router.delete("/logs/clear", summary="清空日志")
-def clear_logs(
-    db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
-):
-    """清空所有签名日志"""
-    db.query(SignatureLog).delete()
-    db.commit()
-    return {"success": True, "message": "所有日志已清空"}
-
-
-@router.delete("/logs/{log_id}", summary="删除单条日志")
-def delete_log(
-    log_id: int,
-    db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
-):
-    """删除指定签名日志"""
-    log = db.query(SignatureLog).filter(SignatureLog.id == log_id).first()
-    if not log:
-        raise HTTPException(status_code=404, detail="日志不存在")
-    
-    db.delete(log)
-    db.commit()
-    return {"success": True, "message": "日志已删除"}
-
-
-@router.get("/logs/export", summary="导出日志 CSV")
-def export_logs(
-    user_key: Optional[str] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
-):
-    """按筛选条件导出日志为 CSV"""
-    query = db.query(SignatureLog)
-    
-    if user_key:
-        query = query.filter(SignatureLog.user_key.contains(user_key))
-    if start_date:
-        try:
-            start = datetime.fromisoformat(start_date)
-            query = query.filter(SignatureLog.created_at >= start)
-        except: pass
-    if end_date:
-        try:
-            end = datetime.fromisoformat(end_date)
-            query = query.filter(SignatureLog.created_at <= end)
-        except: pass
-        
-    logs = query.order_by(desc(SignatureLog.created_at)).all()
-    
-    try:
-        import openpyxl
-        from openpyxl.utils import get_column_letter
-    except ImportError:
-        raise HTTPException(status_code=500, detail="服务器未安装 openpyxl 库，无法导出 Excel。请联系管理员安装。")
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "签名日志"
-    
-    headers = ["ID", "用户Key", "文件名", "文件Token", "配额消耗", "签名时间"]
-    ws.append(headers)
-    
-    for l in logs:
-        ws.append([
-            l.id, l.user_key, l.file_name, l.file_token,
-            "是" if l.quota_consumed else "否",
-            l.created_at.isoformat()
-        ])
-        
-    for idx, _ in enumerate(headers, 1):
-        ws.column_dimensions[get_column_letter(idx)].width = 20
-
-    output = io.BytesIO()
-    wb.save(output)
-    output.seek(0)
-    
-    response = StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    response.headers["Content-Disposition"] = f"attachment; filename=logs_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
-    return response
 
 
 # ==================== 订单管理 API ====================
@@ -809,33 +813,41 @@ def list_orders(
     page_size: int = Query(20, ge=1, le=100),
     status: Optional[str] = None,
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
+    _: bool = Depends(verify_admin),
 ):
     """获取订单列表（分页）"""
     query = db.query(Order)
-    
+
     if status:
         query = query.filter(Order.status == status)
-    
+
     total = query.count()
-    orders = query.order_by(desc(Order.created_at)).offset((page - 1) * page_size).limit(page_size).all()
-    
+    orders = (
+        query.order_by(desc(Order.created_at))
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
-        "items": [{
-            "id": o.id,
-            "order_id": o.order_id,
-            "user_key": o.user_key,
-            "plan_id": o.plan_id,
-            "quota_count": o.quota_count,
-            "amount": o.amount,
-            "status": o.status,
-            "payment_method": o.payment_method,
-            "created_at": o.created_at.isoformat(),
-            "paid_at": o.paid_at.isoformat() if o.paid_at else None
-        } for o in orders]
+        "items": [
+            {
+                "id": o.id,
+                "order_id": o.order_id,
+                "user_key": o.user_key,
+                "plan_id": o.plan_id,
+                "quota_count": o.quota_count,
+                "amount": o.amount,
+                "status": o.status,
+                "payment_method": o.payment_method,
+                "created_at": o.created_at.isoformat() if o.created_at else None,
+                "paid_at": o.paid_at.isoformat() if o.paid_at else None,
+            }
+            for o in orders
+        ],
     }
 
 
@@ -843,14 +855,14 @@ def list_orders(
 
 class CreatePricingPlanRequest(BaseModel):
     """创建套餐请求"""
-    plan_id: str          # 套餐ID，如 pack_10
-    name: str             # 套餐名称
-    quota_count: int      # 签名次数
-    price: int            # 价格（分）
-    sort_order: int = 0   # 排序
-    description: Optional[str] = None  # 描述
-    # 可选：高级字段（不填则由后端自动同步/推导）
-    billing_type: Optional[str] = None  # monthly | yearly
+
+    plan_id: str
+    name: str
+    quota_count: int
+    price: int
+    sort_order: int = 0
+    description: Optional[str] = None
+    billing_type: Optional[str] = None
     monthly_price: Optional[int] = None
     yearly_price: Optional[int] = None
     unlimited: Optional[bool] = None
@@ -859,14 +871,14 @@ class CreatePricingPlanRequest(BaseModel):
 
 class UpdatePricingPlanRequest(BaseModel):
     """更新套餐请求"""
+
     name: Optional[str] = None
     quota_count: Optional[int] = None
     price: Optional[int] = None
     sort_order: Optional[int] = None
     description: Optional[str] = None
     is_active: Optional[bool] = None
-    # 高级字段（可选）
-    billing_type: Optional[str] = None  # monthly | yearly
+    billing_type: Optional[str] = None
     monthly_price: Optional[int] = None
     yearly_price: Optional[int] = None
     unlimited: Optional[bool] = None
@@ -874,33 +886,20 @@ class UpdatePricingPlanRequest(BaseModel):
 
 
 def _sync_pricing_derived_fields(plan: PricingPlan) -> None:
-    """
-    同步/推导价格相关字段，避免后台只改 price 导致 yearly_price/monthly_price/save_percent 不一致。
-    约定：
-    - price 始终是"当前套餐实际售卖价（分）"
-    - monthly_price/yearly_price 用于跨月/年展示节省信息（可为空）
-    - save_percent 仅在 monthly_price 和 yearly_price 同时存在且 monthly_price>0 时自动推导
-    """
-    # 1) 同步当前计费类型下的对应字段
     if plan.billing_type == "monthly":
-        # 仅在管理员未显式设置 monthly_price 时兜底同步
         if plan.monthly_price is None:
             plan.monthly_price = plan.price
     elif plan.billing_type == "yearly":
-        # 仅在管理员未显式设置 yearly_price 时兜底同步
         if plan.yearly_price is None:
             plan.yearly_price = plan.price
     else:
-        # 兜底：未知类型当月付
         plan.billing_type = "monthly"
         if plan.monthly_price is None:
             plan.monthly_price = plan.price
 
-    # 2) 推导 save_percent（年付相对月付的节省）
-    # save_percent = round(1 - yearly_price / (monthly_price*12)) * 100
     if plan.monthly_price and plan.yearly_price and plan.monthly_price > 0:
         yearly_from_monthly = plan.monthly_price * 12
-        if yearly_from_monthly > 0 and plan.yearly_price > 0:
+        if yearly_from_monthly > 0 and plan.yearly_price and plan.yearly_price > 0:
             saved = max(0.0, 1.0 - (plan.yearly_price / float(yearly_from_monthly)))
             plan.save_percent = int(round(saved * 100))
 
@@ -909,33 +908,35 @@ def _sync_pricing_derived_fields(plan: PricingPlan) -> None:
 def list_pricing_plans(
     include_inactive: bool = Query(False, description="是否包含已下架套餐"),
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
+    _: bool = Depends(verify_admin),
 ):
-    """获取所有套餐列表"""
     query = db.query(PricingPlan)
     if not include_inactive:
         query = query.filter(PricingPlan.is_active == True)
-    
+
     plans = query.order_by(PricingPlan.sort_order).all()
-    
+
     return {
-        "items": [{
-            "id": p.id,
-            "plan_id": p.plan_id,
-            "name": p.name,
-            "quota_count": p.quota_count,
-            "price": p.price,
-            "billing_type": p.billing_type,
-            "monthly_price": p.monthly_price,
-            "yearly_price": p.yearly_price,
-            "unlimited": p.unlimited,
-            "save_percent": p.save_percent,
-            "is_active": p.is_active,
-            "sort_order": p.sort_order,
-            "description": p.description,
-            "created_at": p.created_at.isoformat(),
-            "updated_at": p.updated_at.isoformat() if p.updated_at else None,
-        } for p in plans]
+        "items": [
+            {
+                "id": p.id,
+                "plan_id": p.plan_id,
+                "name": p.name,
+                "quota_count": p.quota_count,
+                "price": p.price,
+                "billing_type": p.billing_type,
+                "monthly_price": p.monthly_price,
+                "yearly_price": p.yearly_price,
+                "unlimited": p.unlimited,
+                "save_percent": p.save_percent,
+                "is_active": p.is_active,
+                "sort_order": p.sort_order,
+                "description": p.description,
+                "created_at": p.created_at.isoformat() if p.created_at else None,
+                "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+            }
+            for p in plans
+        ]
     }
 
 
@@ -943,15 +944,12 @@ def list_pricing_plans(
 def create_pricing_plan(
     req: CreatePricingPlanRequest,
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
+    _: bool = Depends(verify_admin),
 ):
-    """创建新套餐"""
-    # 检查 plan_id 是否已存在
     existing = db.query(PricingPlan).filter(PricingPlan.plan_id == req.plan_id).first()
     if existing:
         raise HTTPException(status_code=400, detail="套餐ID已存在")
-    
-    # 基础校验
+
     if req.price < 0:
         raise HTTPException(status_code=400, detail="价格不能为负数")
     if req.quota_count is not None and req.quota_count < 0:
@@ -971,17 +969,12 @@ def create_pricing_plan(
         unlimited=bool(req.unlimited) if req.unlimited is not None else False,
         save_percent=req.save_percent,
     )
-    # 自动同步派生字段（尤其是 monthly_price/yearly_price/save_percent）
     _sync_pricing_derived_fields(plan)
     db.add(plan)
     db.commit()
     db.refresh(plan)
-    
-    return {
-        "success": True,
-        "plan_id": plan.plan_id,
-        "id": plan.id,
-    }
+
+    return {"success": True, "plan_id": plan.plan_id, "id": plan.id}
 
 
 @router.put("/pricing/{plan_id}", summary="更新套餐")
@@ -989,14 +982,12 @@ def update_pricing_plan(
     plan_id: str,
     req: UpdatePricingPlanRequest,
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
+    _: bool = Depends(verify_admin),
 ):
-    """更新套餐信息"""
     plan = db.query(PricingPlan).filter(PricingPlan.plan_id == plan_id).first()
     if not plan:
         raise HTTPException(status_code=404, detail="套餐不存在")
-    
-    # 更新非空字段
+
     if req.name is not None:
         plan.name = req.name
     if req.quota_count is not None:
@@ -1025,44 +1016,34 @@ def update_pricing_plan(
         plan.yearly_price = req.yearly_price
     if req.unlimited is not None:
         plan.unlimited = req.unlimited
-        # unlimited 时 quota_count 通常应为 NULL；这里不强制覆盖，但允许管理员自己调
     if req.save_percent is not None:
         if req.save_percent < 0 or req.save_percent > 100:
             raise HTTPException(status_code=400, detail="save_percent 必须在 0-100 之间")
         plan.save_percent = req.save_percent
 
-    # 同步派生字段（避免只改 price 导致展示/购买不一致）
-    # 如果管理员只改了 price（没有显式传 monthly_price/yearly_price），则把 price 同步到当前计费类型字段
     if req.price is not None:
         if plan.billing_type == "monthly" and req.monthly_price is None:
             plan.monthly_price = plan.price
         if plan.billing_type == "yearly" and req.yearly_price is None:
             plan.yearly_price = plan.price
+
     _sync_pricing_derived_fields(plan)
-    
     db.commit()
-    
-    return {
-        "success": True,
-        "plan_id": plan.plan_id,
-    }
+
+    return {"success": True, "plan_id": plan.plan_id}
 
 
 @router.delete("/pricing/{plan_id}", summary="删除套餐")
 def delete_pricing_plan(
     plan_id: str,
     db: Session = Depends(get_db),
-    _: bool = Depends(verify_admin)
+    _: bool = Depends(verify_admin),
 ):
-    """删除套餐（物理删除）"""
     plan = db.query(PricingPlan).filter(PricingPlan.plan_id == plan_id).first()
     if not plan:
         raise HTTPException(status_code=404, detail="套餐不存在")
-    
+
     db.delete(plan)
     db.commit()
-    
-    return {
-        "success": True,
-        "message": f"套餐 {plan_id} 已删除"
-    }
+
+    return {"success": True, "message": f"套餐 {plan_id} 已删除"}

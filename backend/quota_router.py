@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from database import get_db, init_db
 import quota_service
 
+from user_db_manager import ensure_user_database, get_user_session
+
 router = APIRouter(prefix="/api", tags=["quota"])
 
 
@@ -61,6 +63,8 @@ def get_quota_status(open_id: str, tenant_key: str, db: Session = Depends(get_db
     """
     # 导入飞书官方支付服务
     from payment.feishu_official import feishu_payment_service
+
+    user_key = f"{open_id}::{tenant_key}"
     
     try:
         # 调用飞书官方API获取权益
@@ -68,8 +72,12 @@ def get_quota_status(open_id: str, tenant_key: str, db: Session = Depends(get_db
         
         # 检查是否需要降级到本地管理
         if result.get('use_local', False):
-            # 使用本地配额管理
-            return quota_service.get_quota_status(db, open_id, tenant_key)
+            ensure_user_database(user_key)
+            user_db = get_user_session(user_key)
+            try:
+                return quota_service.get_quota_status(user_db, db, open_id, tenant_key)
+            finally:
+                user_db.close()
         
         # 兼容原有格式返回
         return QuotaStatusResponse(
@@ -81,50 +89,60 @@ def get_quota_status(open_id: str, tenant_key: str, db: Session = Depends(get_db
         )
     except Exception as e:
         print(f"获取配额状态失败: {str(e)}")
-        # 降级到本地管理
-        return quota_service.get_quota_status(db, open_id, tenant_key)
+        ensure_user_database(user_key)
+        user_db = get_user_session(user_key)
+        try:
+            return quota_service.get_quota_status(user_db, db, open_id, tenant_key)
+        finally:
+            user_db.close()
 
 
 @router.get("/quota/check")
 def check_can_sign(open_id: str, tenant_key: str, db: Session = Depends(get_db)):
     """
     检查用户是否可以签名
-    
-    改用飞书官方付费能力API进行权益校验
+
+    改用飞书官方付费能力API进行权益校验；当需要降级到本地时，使用用户独立库中的配额。
     """
-    # 导入飞书官方支付服务
     from payment.feishu_official import feishu_payment_service
-    
+
+    user_key = f"{open_id}::{tenant_key}"
+
     try:
-        # 调用飞书官方API检查权益
         result = feishu_payment_service.check_user_paid_scope(open_id, tenant_key)
-        
+
+        # 如果官方服务提示需要本地兜底，则走用户独立库
+        if result.get('use_local', False):
+            ensure_user_database(user_key)
+            user_db = get_user_session(user_key)
+            try:
+                chk = quota_service.check_can_sign(user_db, db, open_id, tenant_key)
+                return CanSignResponse(**chk)
+            finally:
+                user_db.close()
+
         if result['is_need_pay']:
-            # 用户需要购买
             marketplace_url = feishu_payment_service.get_marketplace_url()
             return CanSignResponse(
                 can_sign=False,
                 reason=f"请前往插件市场购买: {marketplace_url}",
                 consume_quota=False
             )
-        
+
         if not result['has_permission']:
-            # 配额已用完
             return CanSignResponse(
                 can_sign=False,
                 reason="配额已用完,请购买套餐",
                 consume_quota=False
             )
-        
-        # 有权限可以签名
+
         return CanSignResponse(
             can_sign=True,
             reason=None,
             consume_quota=True
         )
-        
+
     except Exception as e:
-        # API调用失败,返回错误
         print(f"飞书API调用失败: {str(e)}")
         return CanSignResponse(
             can_sign=False,
@@ -134,34 +152,46 @@ def check_can_sign(open_id: str, tenant_key: str, db: Session = Depends(get_db))
 
 
 @router.post("/quota/consume")
-def consume_quota(open_id: str, tenant_key: str, file_token: str = None, 
+def consume_quota(open_id: str, tenant_key: str, file_token: str = None,
                   file_name: str = None, db: Session = Depends(get_db)):
     """
     消耗一次配额(签名成功后调用)
-    
-    改用飞书官方API进行配额扣减
+
+    默认改用飞书官方API进行配额扣减；当需要本地兜底(use_local)时，扣减用户独立库中的次数。
     """
-    # 导入飞书官方支付服务
     from payment.feishu_official import feishu_payment_service
-    
+
+    user_key = f"{open_id}::{tenant_key}"
+
     try:
-        # 先检查权益
         check_result = feishu_payment_service.check_user_paid_scope(open_id, tenant_key)
-        
+
+        # 如果官方服务提示需要本地兜底，则走用户独立库扣减
+        if check_result.get('use_local', False):
+            ensure_user_database(user_key)
+            user_db = get_user_session(user_key)
+            try:
+                ok = quota_service.consume_quota(user_db, db, open_id, tenant_key, file_token, file_name)
+            finally:
+                user_db.close()
+
+            if not ok:
+                raise HTTPException(status_code=402, detail="NO_QUOTA")
+
+            return {"success": True}
+
         if not check_result['has_permission']:
             raise HTTPException(status_code=402, detail="NO_QUOTA")
-        
-        # 调用飞书API扣减配额
+
         success = feishu_payment_service.consume_quota(open_id, tenant_key, count=1)
-        
         if not success:
             raise HTTPException(status_code=500, detail="扣减配额失败")
-        
-        # 记录签名日志到本地数据库(可选)
+
+        # 记录签名日志到共享库(可选)
         quota_service.log_signature(db, open_id, tenant_key, file_token, file_name)
-        
+
         return {"success": True}
-        
+
     except HTTPException:
         raise
     except Exception as e:

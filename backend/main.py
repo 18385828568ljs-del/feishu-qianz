@@ -608,14 +608,19 @@ async def upload_signature(
         logger.info(f"Feishu official quota valid for {open_id}, skipping local quota check")
         consume_quota_after = False
     elif DB_AVAILABLE:
-        db = next(get_db())
+        # 本地配额兜底：配额存放在用户独立库
+        from user_db_manager import ensure_user_database, get_user_session
+
+        user_key = f"{open_id}::{tenant_key}"
+        ensure_user_database(user_key)
+        user_db = get_user_session(user_key)
         try:
-            chk = quota_service.check_can_sign(db, open_id, tenant_key)
+            chk = quota_service.check_can_sign(user_db, db, open_id, tenant_key)
             if not chk["can_sign"]:
                 raise HTTPException(status_code=402, detail="NO_QUOTA")
             consume_quota_after = chk.get("consume_quota", True)
         finally:
-            db.close()
+            user_db.close()
     else:
         # 如果数据库不可用，默认允许（用于开发测试）
         logger.warning("Database not available, skipping quota check")
@@ -770,14 +775,19 @@ async def upload_signature(
 
     # 5) 消耗配额（使用数据库服务）
     if consume_quota_after and DB_AVAILABLE:
-        db = next(get_db())
+        # 本地配额兜底：从用户独立库扣减次数
+        from user_db_manager import ensure_user_database, get_user_session
+
+        user_key = f"{open_id}::{tenant_key}"
+        ensure_user_database(user_key)
+        user_db = get_user_session(user_key)
         try:
-            quota_service.consume_quota(db, open_id, tenant_key, file_token, file_name)
+            quota_service.consume_quota(user_db, db, open_id, tenant_key, file_token, file_name)
             logger.info(f"Quota consumed for {open_id}")
         except Exception as e:
             logger.warning(f"Failed to consume quota: {e}")
         finally:
-            db.close()
+            user_db.close()
 
     return {"file_token": file_token, "local_path": local_path, "parent_type": parent_type, "parent_node": parent_node}
 

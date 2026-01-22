@@ -1,18 +1,22 @@
 """
 配额管理服务
 处理用户配额的查询、消耗、充值等逻辑
+
+约定（混合模式）：
+- 套餐/订单/邀请码/定价等仍使用共享库（Base）
+- 用户剩余签字次数等配额状态，存放在每用户独立数据库的 user_profile（UserProfile）中
 """
 import uuid
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 
 from sqlalchemy.orm import Session
 from dateutil.relativedelta import relativedelta
 
-from database import User, InviteCode, Order, SignatureLog, PricingPlan
+from database import InviteCode, Order, SignatureLog, PricingPlan, UserProfile
 
-# 免费试用次数
-FREE_TRIAL_QUOTA = 10
+# 新用户初始免费次数
+FREE_TRIAL_QUOTA = 100
 
 # 默认定价方案（数据库为空时自动初始化）
 # 固定套餐方案，不需要后台配置
@@ -25,7 +29,7 @@ DEFAULT_PRICING_PLANS = [
         "billing_type": "monthly",
         "unlimited": False,
         "sort_order": 1,
-        "description": "每月2000次使用次数"
+        "description": "每月2000次使用次数",
     },
     {
         "id": "pro_monthly",
@@ -38,7 +42,7 @@ DEFAULT_PRICING_PLANS = [
         "save_percent": 24,
         "unlimited": False,
         "sort_order": 2,
-        "description": "每月6000次使用次数"
+        "description": "每月6000次使用次数",
     },
     {
         "id": "pro_yearly",
@@ -51,7 +55,7 @@ DEFAULT_PRICING_PLANS = [
         "save_percent": 24,
         "unlimited": False,
         "sort_order": 3,
-        "description": "年付¥899（相当于月付¥75，节省24%）"
+        "description": "年付¥899（相当于月付¥75，节省24%）",
     },
     {
         "id": "enterprise_monthly",
@@ -64,7 +68,7 @@ DEFAULT_PRICING_PLANS = [
         "save_percent": 33,
         "unlimited": True,
         "sort_order": 4,
-        "description": "不限次数"
+        "description": "不限次数",
     },
     {
         "id": "enterprise_yearly",
@@ -77,7 +81,7 @@ DEFAULT_PRICING_PLANS = [
         "save_percent": 33,
         "unlimited": True,
         "sort_order": 5,
-        "description": "年付¥2,388（相当于月付¥199，节省33%）"
+        "description": "年付¥2,388（相当于月付¥199，节省33%）",
     },
 ]
 
@@ -87,99 +91,113 @@ def get_user_key(open_id: str, tenant_key: str) -> str:
     return f"{open_id}::{tenant_key}"
 
 
-def get_or_create_user(db: Session, open_id: str, tenant_key: str) -> User:
-    """获取或创建用户"""
-    user_key = get_user_key(open_id, tenant_key)
-    user = db.query(User).filter(User.user_key == user_key).first()
-    
+# ==================== 用户库（独立库）配额逻辑 ====================
+
+def get_or_create_user_profile(user_db: Session, open_id: str, tenant_key: str) -> UserProfile:
+    """在用户独立库中获取或创建 user_profile（每库默认只有一条）。"""
+    user = user_db.query(UserProfile).first()
     if not user:
-        user = User(
+        user = UserProfile(
             open_id=open_id,
             tenant_key=tenant_key,
-            user_key=user_key,
             remaining_quota=FREE_TRIAL_QUOTA,
             total_used=0,
             total_paid=0,
+            current_plan_id=None,
+            plan_expires_at=None,
+            plan_quota_reset_at=None,
+            is_unlimited=False,
+            invite_code_used=None,
+            invite_expire_at=None,
         )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-    
+        user_db.add(user)
+        user_db.commit()
+        user_db.refresh(user)
+    else:
+        # 如果库里已有记录，但 open_id/tenant_key 为空或不同，则更新为最新
+        updated = False
+        if open_id and user.open_id != open_id:
+            user.open_id = open_id
+            updated = True
+        if tenant_key and user.tenant_key != tenant_key:
+            user.tenant_key = tenant_key
+            updated = True
+        if updated:
+            user_db.commit()
+            user_db.refresh(user)
+
     return user
 
 
-def check_and_reset_quota(db: Session, user: User) -> None:
-    """检查并重置用户配额（如果套餐到期或重置时间到了）"""
+def check_and_reset_quota(user_db: Session, user: UserProfile, shared_db: Session) -> None:
+    """检查并重置用户配额（如果套餐到期或重置时间到了）。
+
+    注意：套餐定义在共享库（PricingPlan）。
+    """
     now = datetime.utcnow()
-    
-    # 如果用户没有套餐，不需要重置
+
     if not user.current_plan_id:
         return
-    
-    # 检查套餐是否过期
+
+    # 套餐过期
     if user.plan_expires_at and user.plan_expires_at < now:
-        # 套餐已过期，清除套餐信息
         user.current_plan_id = None
         user.plan_expires_at = None
         user.plan_quota_reset_at = None
         user.is_unlimited = False
-        # 保留剩余配额（不清零），但不再自动重置
-        db.commit()
+        user_db.commit()
         return
-    
-    # 检查是否需要重置配额（月付每月重置，年付每年重置）
+
+    # 配额重置
     if user.plan_quota_reset_at and user.plan_quota_reset_at < now:
-        # 获取套餐信息
-        plan = db.query(PricingPlan).filter(PricingPlan.plan_id == user.current_plan_id).first()
+        plan = (
+            shared_db.query(PricingPlan)
+            .filter(PricingPlan.plan_id == user.current_plan_id)
+            .first()
+        )
         if plan:
             if plan.unlimited:
-                # 不限次数，不需要重置配额
                 user.is_unlimited = True
             else:
-                # 重置配额到套餐的配额数
                 user.remaining_quota = plan.quota_count or 0
                 user.is_unlimited = False
-            
-            # 计算下次重置时间
+
             if plan.billing_type == "monthly":
-                # 月付：每月重置
                 user.plan_quota_reset_at = user.plan_quota_reset_at + relativedelta(months=1)
             elif plan.billing_type == "yearly":
-                # 年付：每年重置
                 user.plan_quota_reset_at = user.plan_quota_reset_at + relativedelta(years=1)
-            
-            db.commit()
+
+            user_db.commit()
 
 
-def get_quota_status(db: Session, open_id: str, tenant_key: str) -> Dict[str, Any]:
-    """获取用户配额状态"""
-    user = get_or_create_user(db, open_id, tenant_key)
-    
-    # 检查并重置配额（如果需要）
-    check_and_reset_quota(db, user)
-    db.refresh(user)
-    
+def get_quota_status(user_db: Session, shared_db: Session, open_id: str, tenant_key: str) -> Dict[str, Any]:
+    """获取用户配额状态（配额来自用户库，套餐信息来自共享库）。"""
+    user = get_or_create_user_profile(user_db, open_id, tenant_key)
+
+    check_and_reset_quota(user_db, user, shared_db)
+    user_db.refresh(user)
+
     now = datetime.utcnow()
     invite_active = False
     invite_expire_at = None
-    
+
     if user.invite_expire_at and user.invite_expire_at > now:
         invite_active = True
         invite_expire_at = int(user.invite_expire_at.timestamp())
-    
-    # 获取套餐总配额
+
     plan_quota = None
     if user.current_plan_id:
-        plan = db.query(PricingPlan).filter(PricingPlan.plan_id == user.current_plan_id).first()
+        plan = (
+            shared_db.query(PricingPlan)
+            .filter(PricingPlan.plan_id == user.current_plan_id)
+            .first()
+        )
         if plan and not plan.unlimited:
             plan_quota = plan.quota_count
-    elif not user.invite_expire_at or user.invite_expire_at <= now:
-        # 免费试用用户，总配额为 FREE_TRIAL_QUOTA
-        plan_quota = FREE_TRIAL_QUOTA
-    
+
     return {
         "remaining": user.remaining_quota if not user.is_unlimited else None,
-        "plan_quota": plan_quota,  # 套餐总配额（用于进度条显示）
+        "plan_quota": plan_quota,
         "is_unlimited": user.is_unlimited,
         "total_used": user.total_used,
         "invite_active": invite_active,
@@ -190,112 +208,150 @@ def get_quota_status(db: Session, open_id: str, tenant_key: str) -> Dict[str, An
     }
 
 
-def check_can_sign(db: Session, open_id: str, tenant_key: str) -> Dict[str, Any]:
-    """检查用户是否可以签名"""
-    user = get_or_create_user(db, open_id, tenant_key)
-    
-    # 检查并重置配额（如果需要）
-    check_and_reset_quota(db, user)
-    db.refresh(user)
-    
+def check_can_sign(user_db: Session, shared_db: Session, open_id: str, tenant_key: str) -> Dict[str, Any]:
+    """检查用户是否可以签名（用户配额在用户库）。"""
+    user = get_or_create_user_profile(user_db, open_id, tenant_key)
+
+    check_and_reset_quota(user_db, user, shared_db)
+    user_db.refresh(user)
+
     now = datetime.utcnow()
-    
-    # 检查邀请码是否有效
+
     if user.invite_expire_at and user.invite_expire_at > now:
         return {"can_sign": True, "reason": None, "consume_quota": False}
-    
-    # 检查是否不限次数
+
     if user.is_unlimited:
         return {"can_sign": True, "reason": None, "consume_quota": False}
-    
-    # 检查剩余配额
+
     if user.remaining_quota > 0:
         return {"can_sign": True, "reason": None, "consume_quota": True}
-    
+
     return {"can_sign": False, "reason": "NO_QUOTA", "consume_quota": False}
 
 
-def consume_quota(db: Session, open_id: str, tenant_key: str, file_token: str = None, file_name: str = None) -> bool:
-    """消耗一次配额"""
-    user = get_or_create_user(db, open_id, tenant_key)
-    
-    # 检查并重置配额（如果需要）
-    check_and_reset_quota(db, user)
-    db.refresh(user)
-    
+def consume_quota(
+    user_db: Session,
+    shared_db: Session,
+    open_id: str,
+    tenant_key: str,
+    file_token: str = None,
+    file_name: str = None,
+) -> bool:
+    """消耗一次配额。
+
+    - 扣减发生在用户库 user_profile
+    - 仍然把签名日志写到共享库 signature_logs（保持其它不变）
+    """
+    user = get_or_create_user_profile(user_db, open_id, tenant_key)
+
+    check_and_reset_quota(user_db, user, shared_db)
+    user_db.refresh(user)
+
     now = datetime.utcnow()
     quota_consumed = False
-    
-    # 如果邀请码有效，不消耗配额
+
     if user.invite_expire_at and user.invite_expire_at > now:
         quota_consumed = False
     elif user.is_unlimited:
-        # 不限次数，不消耗配额
         quota_consumed = False
     elif user.remaining_quota > 0:
         user.remaining_quota -= 1
         quota_consumed = True
     else:
-        return False  # 没有配额，无法消耗
-    
-    # 增加使用次数
+        return False
+
     user.total_used += 1
-    
-    # 记录签名日志
-    log = SignatureLog(
-        user_key=user.user_key,
-        file_token=file_token,
-        file_name=file_name,
-        quota_consumed=quota_consumed,
-    )
-    db.add(log)
-    db.commit()
-    
-    return True
+    user_db.commit()
 
-
-def log_signature(db: Session, open_id: str, tenant_key: str, file_token: str = None, file_name: str = None):
-    """
-    记录签名日志
-    
-    使用飞书官方支付后,本地只记录日志,不管理配额
-    """
+    # 共享库日志仍保留
     user_key = get_user_key(open_id, tenant_key)
-    
-    # 创建签名日志记录
     log = SignatureLog(
         user_key=user_key,
         file_token=file_token,
         file_name=file_name,
-        quota_consumed=True  # 标记已消耗配额
+        quota_consumed=quota_consumed,
     )
-    
-    db.add(log)
-    db.commit()
-    
+    shared_db.add(log)
+    shared_db.commit()
+
     return True
 
 
-def validate_invite_code(db: Session, code: str) -> Dict[str, Any]:
-    """验证邀请码是否有效（不消耗次数）"""
-    invite = db.query(InviteCode).filter(
-        InviteCode.code == code,
-        InviteCode.is_active == True
-    ).first()
-    
+def add_quota_to_user_profile(
+    user_db: Session,
+    open_id: str,
+    tenant_key: str,
+    quota_add: int | None,
+    plan_id: str | None = None,
+    plan_expires_at: datetime | None = None,
+    plan_quota_reset_at: datetime | None = None,
+    unlimited: bool | None = None,
+    amount_paid: int | None = None,
+) -> None:
+    """购买成功后，把次数累加到用户独立库（B模式的关键）。"""
+    user = get_or_create_user_profile(user_db, open_id, tenant_key)
+
+    if plan_id is not None:
+        user.current_plan_id = plan_id
+    if plan_expires_at is not None:
+        user.plan_expires_at = plan_expires_at
+    if plan_quota_reset_at is not None:
+        user.plan_quota_reset_at = plan_quota_reset_at
+    if unlimited is not None:
+        user.is_unlimited = unlimited
+
+    if unlimited:
+        # 不限次时不需要累加 remaining_quota
+        pass
+    else:
+        if quota_add is not None and quota_add > 0:
+            user.remaining_quota = (user.remaining_quota or 0) + int(quota_add)
+
+    if amount_paid is not None and amount_paid > 0:
+        user.total_paid = (user.total_paid or 0) + int(amount_paid)
+
+    user_db.commit()
+
+
+# ==================== 共享库（保持不变）的其它逻辑 ====================
+
+
+def log_signature(shared_db: Session, open_id: str, tenant_key: str, file_token: str = None, file_name: str = None):
+    """记录签名日志（共享库）。"""
+    user_key = get_user_key(open_id, tenant_key)
+
+    log = SignatureLog(
+        user_key=user_key,
+        file_token=file_token,
+        file_name=file_name,
+        quota_consumed=True,
+    )
+
+    shared_db.add(log)
+    shared_db.commit()
+
+    return True
+
+
+def validate_invite_code(shared_db: Session, code: str) -> Dict[str, Any]:
+    """验证邀请码是否有效（共享库）。"""
+    invite = (
+        shared_db.query(InviteCode)
+        .filter(InviteCode.code == code, InviteCode.is_active == True)
+        .first()
+    )
+
     if not invite:
         return {"valid": False, "reason": "INVALID_CODE"}
-    
+
     now = datetime.utcnow()
-    
-    # 检查是否过期
+
     if invite.expires_at and invite.expires_at < now:
         return {"valid": False, "reason": "CODE_EXPIRED"}
-    
-    # 检查使用次数
+
     if invite.used_count >= invite.max_usage:
         return {"valid": False, "reason": "CODE_USED_UP"}
-    
+
     return {
         "valid": True,
         "benefit": f"{invite.benefit_days}天免费使用",
@@ -304,31 +360,43 @@ def validate_invite_code(db: Session, code: str) -> Dict[str, Any]:
     }
 
 
-def redeem_invite_code(db: Session, code: str, open_id: str, tenant_key: str) -> Dict[str, Any]:
-    """兑换邀请码"""
-    # 先验证
-    validation = validate_invite_code(db, code)
+def redeem_invite_code(shared_db: Session, code: str, open_id: str, tenant_key: str) -> Dict[str, Any]:
+    """兑换邀请码（共享库保持不变；用户库是否记录 invite 状态暂不迁移）。"""
+    validation = validate_invite_code(shared_db, code)
     if not validation["valid"]:
         return {"success": False, "error": validation["reason"]}
-    
-    user = get_or_create_user(db, open_id, tenant_key)
-    
-    # 检查用户是否已使用过邀请码
+
+    # 旧逻辑依赖 shared_db 的 users 表；为了“其它不变”，这里暂时保持原实现风格
+    # 如果后续你也希望 invite 状态迁移到用户库，再单独做一次迁移。
+    from database import User
+
+    user_key = get_user_key(open_id, tenant_key)
+    user = shared_db.query(User).filter(User.user_key == user_key).first()
+    if not user:
+        user = User(
+            open_id=open_id,
+            tenant_key=tenant_key,
+            user_key=user_key,
+            remaining_quota=0,
+            total_used=0,
+            total_paid=0,
+        )
+        shared_db.add(user)
+        shared_db.commit()
+        shared_db.refresh(user)
+
     if user.invite_code_used:
         return {"success": False, "error": "ALREADY_USED_INVITE"}
-    
-    # 获取邀请码
-    invite = db.query(InviteCode).filter(InviteCode.code == code).first()
-    
-    # 更新用户
+
+    invite = shared_db.query(InviteCode).filter(InviteCode.code == code).first()
+
     user.invite_code_used = code
     user.invite_expire_at = datetime.utcnow() + timedelta(days=invite.benefit_days)
-    
-    # 增加邀请码使用计数
+
     invite.used_count += 1
-    
-    db.commit()
-    
+
+    shared_db.commit()
+
     return {
         "success": True,
         "invite_expire_at": int(user.invite_expire_at.timestamp()),
@@ -336,12 +404,16 @@ def redeem_invite_code(db: Session, code: str, open_id: str, tenant_key: str) ->
     }
 
 
-def create_invite_code(db: Session, max_usage: int = 10, benefit_days: int = 365, 
-                       expires_in_days: int = 30, created_by: str = None) -> Dict[str, Any]:
-    """创建邀请码（管理接口）"""
-    # 生成唯一码
+def create_invite_code(
+    shared_db: Session,
+    max_usage: int = 10,
+    benefit_days: int = 365,
+    expires_in_days: int = 30,
+    created_by: str = None,
+) -> Dict[str, Any]:
+    """创建邀请码（共享库）。"""
     code = f"INV-{uuid.uuid4().hex[:8].upper()}"
-    
+
     invite = InviteCode(
         code=code,
         max_usage=max_usage,
@@ -349,10 +421,10 @@ def create_invite_code(db: Session, max_usage: int = 10, benefit_days: int = 365
         expires_at=datetime.utcnow() + timedelta(days=expires_in_days) if expires_in_days else None,
         created_by=created_by,
     )
-    db.add(invite)
-    db.commit()
-    db.refresh(invite)
-    
+    shared_db.add(invite)
+    shared_db.commit()
+    shared_db.refresh(invite)
+
     return {
         "code": code,
         "max_usage": max_usage,
@@ -361,9 +433,9 @@ def create_invite_code(db: Session, max_usage: int = 10, benefit_days: int = 365
     }
 
 
-def init_default_pricing_plans(db: Session) -> None:
-    """初始化默认套餐（如果数据库为空）"""
-    existing_count = db.query(PricingPlan).count()
+def init_default_pricing_plans(shared_db: Session) -> None:
+    """初始化默认套餐（共享库）。"""
+    existing_count = shared_db.query(PricingPlan).count()
     if existing_count == 0:
         for plan_data in DEFAULT_PRICING_PLANS:
             plan = PricingPlan(
@@ -380,27 +452,29 @@ def init_default_pricing_plans(db: Session) -> None:
                 save_percent=plan_data.get("save_percent"),
                 description=plan_data.get("description"),
             )
-            db.add(plan)
-        db.commit()
+            shared_db.add(plan)
+        shared_db.commit()
 
 
-def get_pricing_plans(db: Session) -> list:
-    """获取定价方案列表（从数据库）"""
-    # 如果数据库为空，自动初始化默认套餐
-    init_default_pricing_plans(db)
-    
-    plans = db.query(PricingPlan).filter(
-        PricingPlan.is_active == True
-    ).order_by(PricingPlan.sort_order).all()
-    
+def get_pricing_plans(shared_db: Session) -> list:
+    """获取定价方案列表（共享库）。"""
+    init_default_pricing_plans(shared_db)
+
+    plans = (
+        shared_db.query(PricingPlan)
+        .filter(PricingPlan.is_active == True)
+        .order_by(PricingPlan.sort_order)
+        .all()
+    )
+
     return [
         {
             "id": p.plan_id,
             "name": p.name,
-            "count": p.quota_count,  # None表示不限次数
+            "count": p.quota_count,
             "price": p.price,
             "description": p.description,
-            "billing_type": p.billing_type,  # monthly 或 yearly
+            "billing_type": p.billing_type,
             "monthly_price": p.monthly_price,
             "yearly_price": p.yearly_price,
             "unlimited": p.unlimited,
@@ -410,35 +484,34 @@ def get_pricing_plans(db: Session) -> list:
     ]
 
 
-def create_order(db: Session, plan_id: str, open_id: str, tenant_key: str) -> Dict[str, Any]:
-    """创建支付订单"""
-    # 从数据库查找套餐
-    plan_obj = db.query(PricingPlan).filter(
-        PricingPlan.plan_id == plan_id,
-        PricingPlan.is_active == True
-    ).first()
+def create_order(shared_db: Session, plan_id: str, open_id: str, tenant_key: str) -> Dict[str, Any]:
+    """创建支付订单（共享库，保持不变）。"""
+    plan_obj = (
+        shared_db.query(PricingPlan)
+        .filter(PricingPlan.plan_id == plan_id, PricingPlan.is_active == True)
+        .first()
+    )
     if not plan_obj:
         return {"success": False, "error": "INVALID_PLAN"}
-    
-    user = get_or_create_user(db, open_id, tenant_key)
-    
-    # 生成订单号
+
+    user_key = get_user_key(open_id, tenant_key)
+
     order_id = f"ORD-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
-    
+
     order = Order(
         order_id=order_id,
-        user_key=user.user_key,
+        user_key=user_key,
         plan_id=plan_id,
         quota_count=plan_obj.quota_count,
         amount=plan_obj.price,
         payment_method="mock",
         status="pending",
-        expires_at=datetime.utcnow() + timedelta(minutes=30),  # 30分钟过期
+        expires_at=datetime.utcnow() + timedelta(minutes=30),
     )
-    db.add(order)
-    db.commit()
-    db.refresh(order)
-    
+    shared_db.add(order)
+    shared_db.commit()
+    shared_db.refresh(order)
+
     return {
         "success": True,
         "order_id": order_id,
@@ -449,82 +522,85 @@ def create_order(db: Session, plan_id: str, open_id: str, tenant_key: str) -> Di
     }
 
 
-def mock_pay_order(db: Session, order_id: str) -> Dict[str, Any]:
-    """模拟支付订单（测试用）"""
-    order = db.query(Order).filter(Order.order_id == order_id).first()
-    
+def mock_pay_order(shared_db: Session, order_id: str) -> Dict[str, Any]:
+    """模拟支付订单（共享库订单状态更新；用户库次数累加）。"""
+    order = shared_db.query(Order).filter(Order.order_id == order_id).first()
+
     if not order:
         return {"success": False, "error": "ORDER_NOT_FOUND"}
-    
+
     if order.status != "pending":
         return {"success": False, "error": f"ORDER_STATUS_INVALID: {order.status}"}
-    
+
     now = datetime.utcnow()
     if order.expires_at and order.expires_at < now:
         order.status = "expired"
-        db.commit()
+        shared_db.commit()
         return {"success": False, "error": "ORDER_EXPIRED"}
-    
-    # 获取套餐信息
-    plan = db.query(PricingPlan).filter(PricingPlan.plan_id == order.plan_id).first()
+
+    plan = shared_db.query(PricingPlan).filter(PricingPlan.plan_id == order.plan_id).first()
     if not plan:
         return {"success": False, "error": "PLAN_NOT_FOUND"}
-    
-    # 更新订单状态
+
+    # 订单支付成功
     order.status = "paid"
     order.paid_at = now
-    
-    # 更新用户套餐和配额
-    user = db.query(User).filter(User.user_key == order.user_key).first()
-    if user:
-        # 设置用户当前套餐
-        user.current_plan_id = order.plan_id
-        user.is_unlimited = plan.unlimited
-        
-        # 计算套餐到期时间
+
+    # 解析 user_key
+    try:
+        open_id, tenant_key = order.user_key.split("::", 1)
+    except Exception:
+        open_id, tenant_key = "", ""
+
+    # 同步到用户独立库：累加次数
+    from user_db_manager import ensure_user_database, get_user_session
+
+    ensure_user_database(order.user_key)
+    user_db = get_user_session(order.user_key)
+    try:
         if plan.billing_type == "monthly":
-            user.plan_expires_at = now + relativedelta(months=1)
-            user.plan_quota_reset_at = now + relativedelta(months=1)
+            plan_expires_at = now + relativedelta(months=1)
+            plan_quota_reset_at = now + relativedelta(months=1)
         elif plan.billing_type == "yearly":
-            user.plan_expires_at = now + relativedelta(years=1)
-            user.plan_quota_reset_at = now + relativedelta(years=1)
+            plan_expires_at = now + relativedelta(years=1)
+            plan_quota_reset_at = now + relativedelta(years=1)
         else:
-            # 默认月付
-            user.plan_expires_at = now + relativedelta(months=1)
-            user.plan_quota_reset_at = now + relativedelta(months=1)
-        
-        # 设置配额
-        if plan.unlimited:
-            # 不限次数，不设置配额
-            user.is_unlimited = True
-            quota_added = None
-        else:
-            # 设置配额为套餐的配额数（不是累加）
-            user.remaining_quota = plan.quota_count or 0
-            user.is_unlimited = False
-            quota_added = plan.quota_count
-        
-        user.total_paid += order.amount
-    
-    db.commit()
-    
+            plan_expires_at = now + relativedelta(months=1)
+            plan_quota_reset_at = now + relativedelta(months=1)
+
+        add_quota_to_user_profile(
+            user_db=user_db,
+            open_id=open_id,
+            tenant_key=tenant_key,
+            quota_add=plan.quota_count,
+            plan_id=order.plan_id,
+            plan_expires_at=plan_expires_at,
+            plan_quota_reset_at=plan_quota_reset_at,
+            unlimited=bool(plan.unlimited),
+            amount_paid=order.amount,
+        )
+    finally:
+        user_db.close()
+
+    shared_db.commit()
+
     return {
         "success": True,
         "order_id": order_id,
-        "quota_added": quota_added,
+        "quota_added": plan.quota_count,
         "is_unlimited": plan.unlimited,
-        "new_remaining": None if plan.unlimited else (user.remaining_quota if user else 0),
-        "plan_expires_at": int(user.plan_expires_at.timestamp()) if user and user.plan_expires_at else None,
+        "new_remaining": None,
+        "plan_expires_at": int((now + relativedelta(months=1)).timestamp()) if plan.billing_type == "monthly" else int((now + relativedelta(years=1)).timestamp()),
     }
 
 
-def get_order_status(db: Session, order_id: str) -> Dict[str, Any]:
-    """查询订单状态"""
-    order = db.query(Order).filter(Order.order_id == order_id).first()
-    
+def get_order_status(shared_db: Session, order_id: str) -> Dict[str, Any]:
+    """查询订单状态（共享库）。"""
+    order = shared_db.query(Order).filter(Order.order_id == order_id).first()
+
     if not order:
         return {"found": False}
-    
+
     return {
         "found": True,
         "order_id": order.order_id,
