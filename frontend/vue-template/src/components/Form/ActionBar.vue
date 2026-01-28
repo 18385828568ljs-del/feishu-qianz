@@ -1,6 +1,6 @@
 <!--
   操作按钮栏组件
-  包含：兑换码、授权、充值、分享 四个操作按钮
+  包含：兑换码、授权码、充值、分享 四个操作按钮
 -->
 <script setup>
 import { defineProps, defineEmits } from 'vue'
@@ -58,16 +58,17 @@ function handleShare() {
       <span>兑换码</span>
     </button>
     
-    <!-- 授权按钮 -->
+    <!-- 授权码按钮 -->
     <button 
       class="action-btn" 
       :class="{ active: activeButton === 'auth' }" 
       @click="handleAuth"
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-        <path d="M12 2a10 10 0 0 0-6.88 17.23l1.15-2.88A7 7 0 1 1 19 12h-3l4 4 4-4h-3A10 10 0 0 0 12 2Z"/>
+        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+        <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
       </svg>
-      <span>{{ authorized ? '已授权' : '授权' }}</span>
+      <span>{{ authorized ? '已配置' : '授权码' }}</span>
       <span class="dot" :class="{ 'dot-active': authorized }"></span>
     </button>
     

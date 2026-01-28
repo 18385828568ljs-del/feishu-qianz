@@ -21,10 +21,6 @@ const props = defineProps({
     type: String,
     default: ''
   },
-  sessionId: {
-    type: String,
-    default: ''
-  },
   userKey: {
     type: String,
     default: ''
@@ -110,7 +106,7 @@ async function loadRecordCount() {
   
   try {
     loadingRecordCount.value = true
-    const result = await getRecordCount(props.appToken, props.tableId, props.sessionId)
+    const result = await getRecordCount(props.appToken, props.tableId, '')
     if (result.success && result.count !== undefined) {
       recordCount.value = result.count
       // 如果当前选择的记录索引超出范围，重置为1
@@ -130,7 +126,7 @@ async function loadRecordCount() {
 // 加载字段
 async function loadFields() {
   await Promise.all([
-    loadTableFields(props.appToken, props.tableId, props.sessionId, showToast),
+    loadTableFields(props.appToken, props.tableId, '', showToast),
     loadRecordCount()
   ])
 }
@@ -144,8 +140,7 @@ function handleGoToFieldSelector() {
 async function handleCreate() {
   const success = await handleCreateShareForm({
     tableId: props.tableId,
-    userKey: props.userKey,
-    sessionId: props.sessionId
+    userKey: props.userKey
   }, showToast)
   
   if (success) {

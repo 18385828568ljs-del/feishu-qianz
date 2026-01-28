@@ -44,22 +44,10 @@ api.interceptors.response.use(
   }
 )
 
-export async function authStart() {
-  const { data } = await api.get('/auth/start')
-  return data // { auth_url, state }
-}
-
-export async function authStatus(sessionId) {
-  const { data } = await api.get('/auth/status', { params: { session_id: sessionId } })
-  return data // { authorized, expires_at, user }
-}
-
-export async function uploadSignature({ blob, fileName, sessionId, folderToken, useUserToken = 1, openId, tenantKey, hasQuota = false }) {
+export async function uploadSignature({ blob, fileName, folderToken, openId, tenantKey, hasQuota = false }) {
   const form = new FormData()
   form.append('file', blob, fileName || 'signature.png')
   form.append('file_name', fileName || 'signature.png')
-  form.append('use_user_token', useUserToken ? 1 : 0)
-  if (sessionId) form.append('session_id', sessionId)
   if (folderToken) form.append('folder_token', folderToken)
   if (openId) form.append('open_id', openId)
   if (tenantKey) form.append('tenant_key', tenantKey)
@@ -126,6 +114,10 @@ export async function getOrderStatus(orderId) {
 
 // 创建分享表单
 export async function createShareForm(formData) {
+  // 如果没有传递 base_token，从 localStorage 获取
+  if (!formData.base_token) {
+    formData.base_token = localStorage.getItem('feishu_base_token') || ''
+  }
   const { data } = await api.post('/api/form/create', formData)
   return data
 }
@@ -138,16 +130,18 @@ export async function getShareFormList(createdBy) {
 
 // 获取多维表格字段列表
 export async function getTableFields(appToken, tableId, sessionId) {
+  const baseToken = localStorage.getItem('feishu_base_token') || ''
   const { data } = await api.get('/api/form/table-fields', {
-    params: { app_token: appToken, table_id: tableId, session_id: sessionId }
+    params: { app_token: appToken, table_id: tableId, session_id: sessionId, base_token: baseToken }
   })
   return data
 }
 
 // 获取多维表格记录数量
 export async function getRecordCount(appToken, tableId, sessionId) {
+  const baseToken = localStorage.getItem('feishu_base_token') || ''
   const { data } = await api.get('/api/form/record-count', {
-    params: { app_token: appToken, table_id: tableId, session_id: sessionId }
+    params: { app_token: appToken, table_id: tableId, session_id: sessionId, base_token: baseToken }
   })
   return data
 }

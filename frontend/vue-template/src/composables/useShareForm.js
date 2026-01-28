@@ -112,29 +112,23 @@ function goBackToBasicInfo() {
  * @param {Object} params - 参数
  * @param {string} params.tableId - 表格 ID
  * @param {string} params.userKey - 用户标识
- * @param {string} params.sessionId - 会话 ID
  * @param {Function} showToast - Toast 通知函数
  */
-async function handleCreateShareForm({ tableId, userKey, sessionId }, showToast) {
+async function handleCreateShareForm({ tableId, userKey }, showToast) {
     if (!shareFormName.value.trim()) {
         showToast?.('请输入表单名称', 'warning')
         return false
     }
 
-    if (!sessionId) {
-        showToast?.('请先点击"授权"按钮完成飞书授权', 'warning')
+    // 检查是否配置了授权码
+    const baseToken = localStorage.getItem('feishu_base_token')
+    if (!baseToken) {
+        showToast?.('请先点击“授权码”按钮配置您的授权码', 'warning')
         return false
     }
 
     if (selectedFields.value.length === 0) {
         showToast?.('请至少选择一个字段', 'warning')
-        return false
-    }
-
-    // 检查是否有签名字段需要上传文件
-    const signatureField = selectedFields.value.find(f => f.input_type === 'attachment')
-    if (signatureField && !sessionId) {
-        showToast?.('上传签名文件需要用户授权，请先完成飞书授权', 'error')
         return false
     }
 
@@ -156,9 +150,9 @@ async function handleCreateShareForm({ tableId, userKey, sessionId }, showToast)
             signature_field_id: signatureField?.field_id || null,
             fields: selectedFields.value,
             created_by: userKey,
-            session_id: sessionId,
-            record_index: selectedRecordIndex.value, // 传递记录条索引
-            show_data: showData.value // 传递是否显示数据的标记
+            base_token: baseToken,  // 传递授权码
+            record_index: selectedRecordIndex.value,
+            show_data: showData.value
         })
         
         console.log('[useShareForm] 表单创建结果:', result)
@@ -166,23 +160,7 @@ async function handleCreateShareForm({ tableId, userKey, sessionId }, showToast)
         if (result.success) {
             const baseUrl = window.location.origin || 'http://localhost:5173'
             generatedShareUrl.value = `${baseUrl}/sign?id=${result.form_id}`
-
-            if (result.has_auth) {
-                showToast?.('分享表单创建成功！', 'success')
-            } else {
-                // 检查是否有签名字段
-                const hasSignatureField = selectedFields.value.some(f => f.input_type === 'attachment')
-                if (hasSignatureField) {
-                    showToast?.('⚠️ 表单已创建，但授权信息保存失败。如需上传签名文件，请重新授权后重新创建表单。', 'error', 5000)
-                } else {
-                    showToast?.('表单已创建，但授权信息保存失败。如需上传文件功能，请重新授权后重新创建表单。', 'warning', 5000)
-                }
-                
-                // 如果有警告信息，也显示
-                if (result.warning) {
-                    console.warn('[useShareForm] 授权警告:', result.warning)
-                }
-            }
+            showToast?.('分享表单创建成功！', 'success')
             return true
         }
         return false

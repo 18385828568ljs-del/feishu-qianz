@@ -81,6 +81,7 @@ Type=simple
 User=$CURRENT_USER
 WorkingDirectory=$BACKEND_DIR
 Environment="PATH=$BACKEND_DIR/.venv/bin"
+Environment="IS_STORE_APP=true"
 ExecStart=$BACKEND_DIR/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=10

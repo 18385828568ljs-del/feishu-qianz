@@ -297,8 +297,7 @@ class SignForm(Base):
     
     # 创建者
     created_by = Column(String(256), nullable=True)  # user_key
-    creator_session_id = Column(String(64), nullable=True)  # 创建者的 session_id（用于从 USER_TOKENS 获取最新的 refresh_token）
-    creator_refresh_token = Column(Text, nullable=True)  # 创建者的 refresh_token（用于外部表单提交，作为备用）
+    creator_base_token = Column(Text, nullable=True)  # 创建者的授权码，用于外部表单提交
     
     # 状态
     is_active = Column(Boolean, default=True, nullable=False)

@@ -13,6 +13,7 @@ import { uploadSignature, consumeQuota } from '@/services/api'
 import { useToast } from '@/composables/useToast'
 import { useAuth } from '@/composables/useAuth'
 import { useQuota } from '@/composables/useQuota'
+import { useBaseToken } from '@/composables/useBaseToken'
 
 // 导入子组件
 import SignatureCard from './SignatureCard.vue'
@@ -21,12 +22,14 @@ import QuotaBar from './QuotaBar.vue'
 import InviteDialog from './InviteDialog.vue'
 import RechargeDialog from './RechargeDialog.vue'
 import ShareFormDialog from './ShareFormDialog.vue'
+import BaseTokenDialog from './BaseTokenDialog.vue'
 import ToastNotification from '../common/ToastNotification.vue'
 
 // 使用 Composables
 const { toastMessage, toastType, showToast } = useToast()
 const { sessionId, authorized, startAuth } = useAuth()
 const { quota, canSign, loadQuota } = useQuota()
+const { hasBaseToken } = useBaseToken()
 
 // 表格状态
 const state = ref({
@@ -49,6 +52,7 @@ const currentAppToken = ref('')
 const showInviteDialog = ref(false)
 const showRechargeDialog = ref(false)
 const showShareFormDialog = ref(false)
+const showBaseTokenDialog = ref(false)
 const activeButton = ref('')
 
 // 监听器卸载函数
@@ -178,8 +182,8 @@ async function uploadToField(fileOrBlob, fileName, mimeType) {
     showToast('请先在表格中点击选择一行记录', 'warning')
     return
   }
-  if (!authorized.value || !sessionId.value) {
-    showToast('请先点击上方"授权登录"，完成授权后再试', 'warning')
+  if (!authorized.value) {
+    showToast('请先点击上方“授权码”按钮，配置您的授权码', 'warning')
     return
   }
   if (!canSign.value) {
@@ -247,7 +251,7 @@ function handleInvite() {
 
 function handleAuth() {
   closeAllDialogs()
-  startAuth(showToast)
+  showBaseTokenDialog.value = true
 }
 
 function handleRecharge() {
@@ -264,6 +268,12 @@ function closeAllDialogs() {
   showInviteDialog.value = false
   showRechargeDialog.value = false
   showShareFormDialog.value = false
+  showBaseTokenDialog.value = false
+}
+
+function handleBaseToken() {
+  closeAllDialogs()
+  showBaseTokenDialog.value = true
 }
 
 function onDialogClose() {
@@ -339,10 +349,16 @@ onUnmounted(() => {
       v-model="showShareFormDialog"
       :app-token="currentAppToken"
       :table-id="state.tableId"
-      :session-id="sessionId"
       :user-key="userKey"
       @close="onDialogClose"
       @toast="handleToast"
+    />
+
+    <!-- 授权码配置弹窗 -->
+    <BaseTokenDialog 
+      v-model="showBaseTokenDialog"
+      @close="onDialogClose"
+      @saved="() => showToast('授权码已保存', 'success')"
     />
 
     <!-- Toast 通知 -->
