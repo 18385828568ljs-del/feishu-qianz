@@ -305,6 +305,7 @@ class SignForm(Base):
     
     # 记录条索引
     record_index = Column(Integer, default=1, nullable=False)  # 记录条索引，默认为1（记录条1）
+    record_id = Column(String(64), nullable=True)  # 缓存的记录ID，避免每次查询
     
     # 显示数据
     show_data = Column(Boolean, default=False, nullable=False)  # 是否在表单中显示关联记录的数据

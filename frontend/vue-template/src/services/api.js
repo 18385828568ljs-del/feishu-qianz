@@ -129,19 +129,19 @@ export async function getShareFormList(createdBy) {
 }
 
 // 获取多维表格字段列表
-export async function getTableFields(appToken, tableId, sessionId) {
+export async function getTableFields(appToken, tableId) {
   const baseToken = localStorage.getItem('feishu_base_token') || ''
   const { data } = await api.get('/api/form/table-fields', {
-    params: { app_token: appToken, table_id: tableId, session_id: sessionId, base_token: baseToken }
+    params: { app_token: appToken, table_id: tableId, base_token: baseToken }
   })
   return data
 }
 
 // 获取多维表格记录数量
-export async function getRecordCount(appToken, tableId, sessionId) {
+export async function getRecordCount(appToken, tableId) {
   const baseToken = localStorage.getItem('feishu_base_token') || ''
   const { data } = await api.get('/api/form/record-count', {
-    params: { app_token: appToken, table_id: tableId, session_id: sessionId, base_token: baseToken }
+    params: { app_token: appToken, table_id: tableId, base_token: baseToken }
   })
   return data
 }

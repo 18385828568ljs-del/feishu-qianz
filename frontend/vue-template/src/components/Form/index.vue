@@ -27,7 +27,7 @@ import ToastNotification from '../common/ToastNotification.vue'
 
 // 使用 Composables
 const { toastMessage, toastType, showToast } = useToast()
-const { sessionId, authorized, startAuth } = useAuth()
+const { authorized, startAuth } = useAuth()
 const { quota, canSign, loadQuota } = useQuota()
 const { hasBaseToken } = useBaseToken()
 
@@ -224,12 +224,10 @@ async function uploadToField(fileOrBlob, fileName, mimeType) {
     await loadQuota(userInfo.value.openId, userInfo.value.tenantKey)
     
     // 异步备份（带上用户信息）
-    if (authorized.value && sessionId.value) {
+    if (authorized.value) {
       uploadSignature({
         blob: fileOrBlob,
         fileName,
-        sessionId: sessionId.value,
-        useUserToken: 1,
         openId: userInfo.value.openId,
         tenantKey: userInfo.value.tenantKey,
       }).catch(err => console.warn('[Backup] Backup failed:', err))

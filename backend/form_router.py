@@ -263,12 +263,12 @@ def get_table_fields(app_token: str, table_id: str, base_token: str) -> list:
 # ==================== API 路由 ====================
 
 @router.get("/table-fields")
-def get_table_fields_api(app_token: str, table_id: str, base_token: Optional[str] = None, session_id: Optional[str] = None):
+def get_table_fields_api(app_token: str, table_id: str, base_token: Optional[str] = None):
     """获取多维表格的字段列表"""
+    token = get_auth_token(base_token)
+    if not token:
+        raise HTTPException(status_code=401, detail="请先配置授权码")
     try:
-        token = get_auth_token(base_token)
-        if not token:
-            raise HTTPException(status_code=401, detail="请提供授权码 (base_token)")
         raw_fields = get_table_fields(app_token, table_id, token)
         
         # 转换为前端可用格式
@@ -300,12 +300,12 @@ def get_table_fields_api(app_token: str, table_id: str, base_token: Optional[str
 
 
 @router.get("/record-count")
-def get_record_count_api(app_token: str, table_id: str, base_token: Optional[str] = None, session_id: Optional[str] = None):
+def get_record_count_api(app_token: str, table_id: str, base_token: Optional[str] = None):
     """获取多维表格的记录数量"""
+    token = get_auth_token(base_token)
+    if not token:
+        raise HTTPException(status_code=401, detail="请先配置授权码")
     try:
-        token = get_auth_token(base_token)
-        if not token:
-            raise HTTPException(status_code=401, detail="请提供授权码 (base_token)")
         records = get_bitable_records(app_token, table_id, token)
         return {"success": True, "count": len(records)}
     except Exception as e:
@@ -316,17 +316,26 @@ def get_record_count_api(app_token: str, table_id: str, base_token: Optional[str
 @router.post("/create")
 def create_form(req: CreateFormRequest, db: Session = Depends(get_db)):
     """创建外部签名表单"""
-    # 验证授权码
     if not req.base_token:
         raise HTTPException(status_code=401, detail="请提供授权码 (base_token)")
     
     form_id = generate_form_id()
     
-    # 序列化字段配置（优先使用 fields，兼容 extra_fields）
+    # 序列化字段配置
     fields_to_save = req.fields or req.extra_fields or []
     extra_fields_json = None
     if fields_to_save:
         extra_fields_json = json.dumps([f.dict() for f in fields_to_save], ensure_ascii=False)
+    
+    # 如果启用了预填数据，提前获取并缓存 record_id
+    cached_record_id = None
+    if req.show_data and req.record_index and req.record_index > 0:
+        cached_record_id = get_bitable_record_by_index(
+            req.app_token,
+            req.table_id,
+            req.record_index,
+            req.base_token
+        )
     
     form = SignForm(
         form_id=form_id,
@@ -337,8 +346,9 @@ def create_form(req: CreateFormRequest, db: Session = Depends(get_db)):
         signature_field_id=req.signature_field_id,
         extra_fields=extra_fields_json,
         created_by=req.created_by,
-        creator_base_token=req.base_token,  # 保存创建者的授权码
+        creator_base_token=req.base_token,
         record_index=req.record_index or 1,
+        record_id=cached_record_id,
         show_data=req.show_data or False
     )
     
@@ -426,14 +436,21 @@ def get_form_record_data(form_id: str, db: Session = Depends(get_db)):
     if not base_token:
         raise HTTPException(status_code=401, detail="表单创建者未配置授权码")
     
-    # 根据 record_index 获取记录ID
     try:
-        record_id = get_bitable_record_by_index(
-            form.app_token,
-            form.table_id,
-            form.record_index,
-            base_token
-        )
+        # 优先使用缓存的 record_id，避免查询所有记录
+        record_id = form.record_id
+        if not record_id:
+            # 回退到按索引查找（兼容旧数据）
+            record_id = get_bitable_record_by_index(
+                form.app_token,
+                form.table_id,
+                form.record_index,
+                base_token
+            )
+            # 更新缓存
+            if record_id:
+                form.record_id = record_id
+                db.commit()
         
         if not record_id:
             raise HTTPException(status_code=404, detail=f"记录条{form.record_index}不存在")

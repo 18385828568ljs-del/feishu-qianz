@@ -21,10 +21,9 @@ const showData = ref(false) // 是否在表单中显示关联记录的数据
  * 加载多维表格字段列表
  * @param {string} appToken - 表格 app_token
  * @param {string} tableId - 表格 ID
- * @param {string} sessionId - 会话 ID
  * @param {Function} showToast - Toast 通知函数
  */
-async function loadTableFields(appToken, tableId, sessionId, showToast) {
+async function loadTableFields(appToken, tableId, showToast) {
     try {
         loadingFields.value = true
         currentAppToken.value = appToken
@@ -34,7 +33,7 @@ async function loadTableFields(appToken, tableId, sessionId, showToast) {
             return
         }
 
-        const result = await getTableFields(appToken, tableId, sessionId)
+        const result = await getTableFields(appToken, tableId)
 
         if (result.success && result.fields) {
             availableFields.value = result.fields
