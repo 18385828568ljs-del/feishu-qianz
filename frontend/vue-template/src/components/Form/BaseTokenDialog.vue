@@ -72,10 +72,20 @@ function handleClear() {
     </template>
     
     <div class="dialog-content">
-      <!-- 信息提示卡片：已移除，简化界面 -->
+      <!-- 获取授权码指引 -->
 
       <!-- 输入区域 -->
       <div class="input-section">
+        <div class="help-link-wrapper">
+          <p class="input-hint">为了保护数据安全，请配置您的授权码：</p>
+          <a 
+            class="info-link" 
+            href="https://dcnpj27i4okj.feishu.cn/docx/BP8kdlxCeoLtyQxlVBacg51Ynpe" 
+            target="_blank"
+          >
+            如何获取授权码？查看详细教程
+          </a>
+        </div>
         <el-input 
           v-model="inputToken" 
           type="password"
@@ -177,21 +187,38 @@ function handleClear() {
   margin-bottom: 8px;
 }
 
+.styled-input {
+  margin-bottom: 24px;
+}
+
+.help-link-wrapper {
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.input-hint {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1d1d1f;
+  margin-bottom: 4px;
+}
+
 .info-link {
   font-size: 13px;
   color: #007aff;
   text-decoration: none;
   font-weight: 500;
+  width: fit-content;
+  transition: opacity 0.2s;
 }
 
 .info-link:hover {
   text-decoration: underline;
+  opacity: 0.8;
 }
 
-/* 输入框样式 */
-.styled-input {
-  margin-bottom: 16px;
-}
 
 .styled-input :deep(.el-input__wrapper) {
   padding: 8px 16px;
