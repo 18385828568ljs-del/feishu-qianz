@@ -11,6 +11,7 @@
     <div class="ops">
       <el-button @click="clear">清除</el-button>
       <el-button type="primary" @click="confirm">确认</el-button>
+      <el-button type="success" @click="batchConfirm">批量确认</el-button>
     </div>
   </div>
 </template>
@@ -18,7 +19,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 
-const emits = defineEmits(['confirm'])
+const emits = defineEmits(['confirm', 'batchConfirm'])
 const canvas = ref(null)
 let ctx
 let drawing = false
@@ -91,6 +92,15 @@ function confirm() {
   // 导出 PNG Blob
   canvas.value.toBlob(blob => {
     emits('confirm', blob)
+    // 确认后自动清除画布
+    clear()
+  }, 'image/png')
+}
+
+function batchConfirm() {
+  // 批量确认 - 导出 PNG Blob
+  canvas.value.toBlob(blob => {
+    emits('batchConfirm', blob)
     // 确认后自动清除画布
     clear()
   }, 'image/png')

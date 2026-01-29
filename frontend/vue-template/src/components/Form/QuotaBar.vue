@@ -29,7 +29,9 @@ function formatDate(timestamp) {
 // 计算进度百分比
 const progressPercent = computed(() => {
   if (props.quota.isUnlimited || props.quota.inviteActive) return 100
-  const total = props.quota.planQuota || 10  // 默认免费试用额度
+  // 总额逻辑：取 (剩余+已用) 和 (套餐额度) 中的较大值
+  // 这样既能兼容免费试用用户(可能是100)，也能兼容充值用户
+  const total = Math.max(props.quota.remaining + props.quota.totalUsed, props.quota.planQuota || 100)
   const remaining = props.quota.remaining || 0
   return Math.min(100, Math.max(0, (remaining / total) * 100))
 })
@@ -69,7 +71,11 @@ const progressColor = computed(() => {
       <div class="quota-header">
         <span class="quota-label">剩余额度</span>
         <span v-if="quota.planExpiresAt" class="expire-center">{{ formatDate(quota.planExpiresAt) }} 到期</span>
-        <span class="quota-count">{{ quota.remaining }}</span>
+        <div class="quota-values">
+          <span class="quota-text">剩余: {{ quota.remaining }}</span>
+          <span class="quota-divider">/</span>
+          <span class="quota-text">总额: {{ Math.max(quota.remaining + quota.totalUsed, quota.planQuota || 100) }}</span>
+        </div>
       </div>
       <div class="quota-progress-bar">
         <div 
@@ -177,5 +183,18 @@ const progressColor = computed(() => {
   font-size: 12px;
   color: #86868b;
   font-weight: 400;
+}
+.quota-values {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1d1d1f;
+}
+
+.quota-divider {
+  color: #c7c7cc;
+  margin: 0 2px;
 }
 </style>

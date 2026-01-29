@@ -52,7 +52,19 @@ export async function uploadSignature({ blob, fileName, folderToken, openId, ten
   if (openId) form.append('open_id', openId)
   if (tenantKey) form.append('tenant_key', tenantKey)
   form.append('has_quota', hasQuota ? 1 : 0)  // 飞书官方付费权益标记
-  const { data } = await api.post('/api/sign/upload', form)
+
+  // 从 localStorage 获取用户的授权码
+  const baseToken = localStorage.getItem('feishu_base_token') || ''
+
+  // 将用户授权码添加到请求头
+  const config = {}
+  if (baseToken) {
+    config.headers = {
+      'X-Base-Token': baseToken  // 使用自定义头传递授权码
+    }
+  }
+
+  const { data } = await api.post('/api/sign/upload', form, config)
   return data.file_token
 }
 
@@ -68,9 +80,16 @@ export async function checkCanSign(openId, tenantKey) {
 }
 
 // 消耗配额
-export async function consumeQuota(openId, tenantKey, fileToken, fileName) {
+export async function consumeQuota(openId, tenantKey, fileToken, fileName, count = 1) {
+  // console.log('[Api] Consuming quota for', openId)
   const { data } = await api.post('/api/quota/consume', null, {
-    params: { open_id: openId, tenant_key: tenantKey, file_token: fileToken, file_name: fileName }
+    params: {
+      open_id: openId,
+      tenant_key: tenantKey,
+      file_token: fileToken,
+      file_name: fileName,
+      count: count
+    }
   })
   return data
 }
@@ -151,6 +170,17 @@ export async function getFormRecordData(formId) {
   const { data } = await api.get(`/api/form/${formId}/record-data`)
   return data
 }
+
+/**
+ * 清空所有表单
+ */
+export async function clearAllForms(createdBy) {
+  const { data } = await api.delete('/api/form/clear-all', {
+    params: { created_by: createdBy }
+  })
+  return data
+}
+
 
 // ==================== 支付宝支付 (YunGouOS) ====================
 

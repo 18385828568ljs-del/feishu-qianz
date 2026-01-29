@@ -31,7 +31,7 @@ async function loadQuota(openId, tenantKey) {
         const data = await getQuota(openId, tenantKey)
         quota.value = {
             remaining: data.remaining || 0,
-            planQuota: data.plan_quota || 10,  // 默认免费试用 10 次
+            planQuota: data.plan_quota || 100,  // 默认免费试用 100 次
             isUnlimited: data.is_unlimited || false,
             totalUsed: data.total_used || 0,
             inviteActive: data.invite_active || false,

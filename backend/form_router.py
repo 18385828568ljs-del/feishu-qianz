@@ -21,10 +21,6 @@ router = APIRouter(
     responses={404: {"description": "表单不存在"}}
 )
 
-# 从环境变量获取飞书应用配置
-APP_ID = os.getenv("APP_ID", "")
-APP_SECRET = os.getenv("APP_SECRET", "")
-
 
 # ==================== 字段类型映射 ====================
 # 飞书字段类型代码 -> 表单输入类型
@@ -105,8 +101,14 @@ def log_to_file(msg):
 
 
 def get_auth_token(base_token: Optional[str] = None) -> str:
-    """统一获取鉴权 Token"""
-    return base_token or auth_service.PERSONAL_BASE_TOKEN
+    """
+    统一获取鉴权 Token
+    
+    注意：不再使用全局默认授权码，必须提供 base_token
+    """
+    if not base_token:
+        raise ValueError("未提供授权码，无法进行操作")
+    return base_token
 
 def upload_to_bitable(app_token: str, file_data: bytes, file_name: str, base_token: str) -> str:
     """上传文件到多维表格并返回 file_token"""
@@ -265,10 +267,8 @@ def get_table_fields(app_token: str, table_id: str, base_token: str) -> list:
 @router.get("/table-fields")
 def get_table_fields_api(app_token: str, table_id: str, base_token: Optional[str] = None):
     """获取多维表格的字段列表"""
-    token = get_auth_token(base_token)
-    if not token:
-        raise HTTPException(status_code=401, detail="请先配置授权码")
     try:
+        token = get_auth_token(base_token)
         raw_fields = get_table_fields(app_token, table_id, token)
         
         # 转换为前端可用格式
@@ -294,6 +294,8 @@ def get_table_fields_api(app_token: str, table_id: str, base_token: Optional[str
                 "placeholder": f"请输入{f.get('field_name', '')}"
             })
         return {"success": True, "fields": fields}
+    except ValueError:
+        raise HTTPException(status_code=401, detail="请先配置授权码")
     except Exception as e:
         print(f"[table-fields] ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=f"获取字段列表失败: {str(e)}")
@@ -302,12 +304,12 @@ def get_table_fields_api(app_token: str, table_id: str, base_token: Optional[str
 @router.get("/record-count")
 def get_record_count_api(app_token: str, table_id: str, base_token: Optional[str] = None):
     """获取多维表格的记录数量"""
-    token = get_auth_token(base_token)
-    if not token:
-        raise HTTPException(status_code=401, detail="请先配置授权码")
     try:
+        token = get_auth_token(base_token)
         records = get_bitable_records(app_token, table_id, token)
         return {"success": True, "count": len(records)}
+    except ValueError:
+        raise HTTPException(status_code=401, detail="请先配置授权码")
     except Exception as e:
         print(f"[record-count] ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=f"获取记录数量失败: {str(e)}")
@@ -363,6 +365,41 @@ def create_form(req: CreateFormRequest, db: Session = Depends(get_db)):
         "form_id": form_id,
         "share_url": f"/sign/{form_id}"
     }
+
+
+@router.delete("/clear-all", summary="清空当前用户的所有表单")
+def clear_all_forms(
+    created_by: str,
+    db: Session = Depends(get_db)
+):
+    """
+    清空指定用户创建的所有表单
+    
+    - **created_by**: 用户唯一标识（格式: open_id::tenant_key）
+    """
+    try:
+        # 查找该用户创建的所有表单
+        forms = db.query(SignForm).filter(
+            SignForm.created_by == created_by,
+            SignForm.is_active == True
+        ).all()
+        
+        deleted_count = len(forms)
+        
+        # 软删除所有表单
+        for form in forms:
+            form.is_active = False
+            form.updated_at = datetime.utcnow()
+        
+        db.commit()
+        
+        return {
+            "message": f"已清空 {deleted_count} 个表单",
+            "deleted_count": deleted_count
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/{form_id}/config")

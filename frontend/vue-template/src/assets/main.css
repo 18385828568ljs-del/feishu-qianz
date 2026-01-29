@@ -1,1 +1,16 @@
 @import 'reset-css';
+
+/* 隐藏滚动条 */
+/* Chrome, Safari, Opera */
+::-webkit-scrollbar {
+    display: none;
+}
+
+/* IE, Edge, Firefox */
+html,
+body {
+    -ms-overflow-style: none;
+    /* IE and Edge */
+    scrollbar-width: none;
+    /* Firefox */
+}

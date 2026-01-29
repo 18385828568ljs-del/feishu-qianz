@@ -6,7 +6,7 @@
 <script setup>
 import { bitable } from '@lark-base-open/js-sdk'
 import { ref, onMounted, computed, onUnmounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { uploadSignature, consumeQuota } from '@/services/api'
 
 // 导入 Composables
@@ -23,7 +23,6 @@ import InviteDialog from './InviteDialog.vue'
 import RechargeDialog from './RechargeDialog.vue'
 import ShareFormDialog from './ShareFormDialog.vue'
 import BaseTokenDialog from './BaseTokenDialog.vue'
-import ToastNotification from '../common/ToastNotification.vue'
 
 // 使用 Composables
 const { toastMessage, toastType, showToast } = useToast()
@@ -54,6 +53,11 @@ const showRechargeDialog = ref(false)
 const showShareFormDialog = ref(false)
 const showBaseTokenDialog = ref(false)
 const activeButton = ref('')
+
+// 批量操作进度状态
+const showBatchProgressDialog = ref(false)
+const batchProgress = ref({ current: 0, total: 0 })
+const batchCancelled = ref(false)
 
 // 监听器卸载函数
 let offSelectionChange = null
@@ -108,7 +112,8 @@ async function init() {
               state.value.attachFieldId = event.data.fieldId
               // 使用用户选中的附件字段
             } else {
-              // 如果选中的不是附件字段，给出提示
+              // 如果选中的不是附件字段，清空附件字段ID并给出提示
+              state.value.attachFieldId = ''
               showToast('请选择附件/签名列后再进行签名！', 'warning', 2000)
             }
           } catch (e) {
@@ -241,6 +246,123 @@ async function uploadToField(fileOrBlob, fileName, mimeType) {
   }
 }
 
+// 批量签名确认
+async function onBatchConfirm(blob) {
+  if (!state.value.tableId || !state.value.attachFieldId) {
+    showToast('未获取到表信息或附件字段', 'warning')
+    return
+  }
+  if (!authorized.value) {
+    showToast('请先点击上方"授权码"按钮，配置您的授权码', 'warning')
+    return
+  }
+
+  try {
+    const table = await bitable.base.getTableById(state.value.tableId)
+    const recordIdList = await table.getRecordIdList()
+    
+    if (recordIdList.length === 0) {
+      showToast('表格中没有记录', 'warning')
+      return
+    }
+
+    // 确认对话框
+    const confirmed = await ElMessageBox.confirm(
+      `确定要将签名填充到整列（共 ${recordIdList.length} 行）吗？`,
+      '批量确认',
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        type: 'warning',
+      }
+    ).catch(() => false)
+
+    if (!confirmed) return
+
+    // 重置状态
+    batchCancelled.value = false
+    batchProgress.value = { current: 0, total: recordIdList.length }
+    showBatchProgressDialog.value = true
+
+    state.value.loading = true
+    const fileName = `signature_batch_${Date.now()}.png`
+    const file = new File([blob], fileName, { type: 'image/png' })
+    
+    const attachField = await table.getFieldById(state.value.attachFieldId)
+    const cell = await attachField.createCell(file)
+    
+    let successCount = 0
+    let failCount = 0
+    
+    // 批量填充
+    for (let i = 0; i < recordIdList.length; i++) {
+      // 检查是否取消
+      if (batchCancelled.value) {
+        break
+      }
+
+      try {
+        await table.setCellValue(state.value.attachFieldId, recordIdList[i], cell.val)
+        successCount++
+      } catch (e) {
+        console.error(`[Batch] Failed to fill record ${recordIdList[i]}:`, e)
+        failCount++
+      }
+      
+      // 更新进度
+      batchProgress.value.current = i + 1
+    }
+    
+    state.value.loading = false
+    showBatchProgressDialog.value = false
+    
+    // 消耗配额（批量操作按成功次数计算）
+    if (!quota.value.inviteActive && successCount > 0) {
+      try {
+        // 这里简化处理，实际可能需要调整配额消耗策略
+        await consumeQuota(userInfo.value.openId, userInfo.value.tenantKey, 'batch_upload', 'batch_records', successCount)
+      } catch (err) {
+        console.warn('[Quota] Failed to consume quota:', err)
+      }
+    }
+    
+    // 显示结果摘要
+    if (batchCancelled.value) {
+      showToast(`批量填充已取消！已完成 ${successCount} 行`, 'info', 3000)
+    } else if (failCount > 0) {
+      showToast(`批量填充完成！成功 ${successCount} 行，失败 ${failCount} 行`, 'warning', 3000)
+    } else {
+      showToast(`批量填充成功！已填充 ${successCount} 行`, 'success', 3000)
+    }
+    
+    await loadQuota(userInfo.value.openId, userInfo.value.tenantKey)
+    
+    // 异步备份
+    if (authorized.value) {
+      uploadSignature({
+        blob,
+        fileName,
+        openId: userInfo.value.openId,
+        tenantKey: userInfo.value.tenantKey,
+        hasQuota: true // 批量操作已扣除配额，上传时不需再次扣除
+      }).catch(err => console.warn('[Backup] Backup failed:', err))
+    }
+  } catch (e) {
+    state.value.loading = false
+    showBatchProgressDialog.value = false
+    if (e !== false) { // 不是取消操作
+      console.error('[Batch] Error:', e)
+      const errorMsg = e?.response?.data?.detail || e?.message || String(e)
+      showToast(`批量填充失败：${errorMsg}`, 'error', 3000)
+    }
+  }
+}
+
+// 取消批量操作
+function cancelBatchOperation() {
+  batchCancelled.value = true
+}
+
 // 操作栏事件处理
 function handleInvite() {
   closeAllDialogs()
@@ -306,6 +428,7 @@ onUnmounted(() => {
       mode="signature"
       field-name="签名区域"
       @confirm="onConfirm"
+      @batch-confirm="onBatchConfirm"
     />
 
     <!-- 操作栏 -->
@@ -359,8 +482,33 @@ onUnmounted(() => {
       @saved="() => showToast('授权码已保存', 'success')"
     />
 
-    <!-- Toast 通知 -->
-    <ToastNotification :message="toastMessage" :type="toastType" />
+    <!-- 批量填充进度对话框 -->
+    <el-dialog
+      v-model="showBatchProgressDialog"
+      title="批量填充进度"
+      width="400px"
+      :close-on-click-modal="false"
+      :close-on-press-escape="false"
+      :show-close="false"
+      align-center
+      append-to-body
+    >
+      <div style="text-align: center; padding: 20px 0;">
+        <el-progress 
+          :percentage="Math.round((batchProgress.current / batchProgress.total) * 100)" 
+          :color="batchCancelled ? '#909399' : '#07c160'"
+        />
+        <p style="margin-top: 16px; font-size: 14px; color: #606266;">
+          {{ batchCancelled ? '正在取消...' : `正在填充: ${batchProgress.current} / ${batchProgress.total}` }}
+        </p>
+      </div>
+      <template #footer>
+        <el-button @click="cancelBatchOperation" :disabled="batchCancelled">
+          {{ batchCancelled ? '取消中...' : '取消操作' }}
+        </el-button>
+      </template>
+    </el-dialog>
+
   </div>
 </template>
 

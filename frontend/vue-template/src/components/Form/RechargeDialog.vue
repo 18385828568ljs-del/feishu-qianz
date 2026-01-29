@@ -290,8 +290,10 @@ onUnmounted(() => {
   <el-dialog 
     :model-value="modelValue" 
     @update:model-value="$emit('update:modelValue', $event)"
-    width="92%" 
+    width="90%" 
     center 
+    align-center
+    append-to-body
     :show-close="false"
     class="recharge-dialog"
     @close="handleClose"

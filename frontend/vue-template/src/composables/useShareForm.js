@@ -3,7 +3,7 @@
  * 封装分享表单创建和字段选择逻辑
  */
 import { ref } from 'vue'
-import { createShareForm, getTableFields } from '@/services/api'
+import { createShareForm, getTableFields, getShareFormList } from '@/services/api'
 
 // 响应式状态
 const shareFormName = ref('')
@@ -153,7 +153,7 @@ async function handleCreateShareForm({ tableId, userKey }, showToast) {
             record_index: selectedRecordIndex.value,
             show_data: showData.value
         })
-        
+
         console.log('[useShareForm] 表单创建结果:', result)
 
         if (result.success) {
@@ -176,7 +176,7 @@ async function handleCreateShareForm({ tableId, userKey }, showToast) {
  */
 function copyShareUrl(showToast) {
     if (!generatedShareUrl.value) return
-    
+
     // 方案1: 使用 clipboard API（需要安全上下文）
     if (navigator.clipboard && window.isSecureContext) {
         navigator.clipboard.writeText(generatedShareUrl.value).then(() => {
@@ -205,10 +205,10 @@ function fallbackCopy(text, showToast) {
         document.body.appendChild(textArea)
         textArea.focus()
         textArea.select()
-        
+
         const successful = document.execCommand('copy')
         document.body.removeChild(textArea)
-        
+
         if (successful) {
             showToast?.('链接已复制到剪贴板', 'success')
         } else {
@@ -253,6 +253,31 @@ function resetShareForm() {
     showData.value = false // 重置显示数据开关
 }
 
+const formList = ref([])
+const loadingList = ref(false)
+
+/**
+ * 加载表单历史
+ * @param {string} userKey - 用户唯一标识
+ */
+async function loadHistory(userKey) {
+    if (!userKey) return
+    try {
+        loadingList.value = true
+        const result = await getShareFormList(userKey)
+        if (result && result.forms) {
+            formList.value = result.forms
+        } else {
+            formList.value = []
+        }
+    } catch (e) {
+        console.error('加载历史失败:', e)
+        formList.value = []
+    } finally {
+        loadingList.value = false
+    }
+}
+
 export function useShareForm() {
     return {
         // 状态
@@ -266,6 +291,8 @@ export function useShareForm() {
         currentAppToken,
         selectedRecordIndex,
         showData,
+        formList,
+        loadingList,
         // 方法
         loadTableFields,
         toggleFieldSelection,
@@ -276,6 +303,7 @@ export function useShareForm() {
         handleCreateShareForm,
         copyShareUrl,
         getFieldTypeName,
-        resetShareForm
+        resetShareForm,
+        loadHistory
     }
 }

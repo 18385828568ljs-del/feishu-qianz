@@ -56,147 +56,43 @@ class CreateInviteRequest(BaseModel):
 
 @router.get("/quota/status")
 def get_quota_status(open_id: str, tenant_key: str, db: Session = Depends(get_db)):
-    """
-    获取用户配额状态
-    
-    优先使用飞书官方API，降级使用本地管理
-    """
-    # 导入飞书官方支付服务
-    from payment.feishu_official import feishu_payment_service
-
+    """获取用户配额状态"""
     user_key = f"{open_id}::{tenant_key}"
-    
+    ensure_user_database(user_key)
+    user_db = get_user_session(user_key)
     try:
-        # 调用飞书官方API获取权益
-        result = feishu_payment_service.check_user_paid_scope(open_id, tenant_key)
-        
-        # 检查是否需要降级到本地管理
-        if result.get('use_local', False):
-            ensure_user_database(user_key)
-            user_db = get_user_session(user_key)
-            try:
-                return quota_service.get_quota_status(user_db, db, open_id, tenant_key)
-            finally:
-                user_db.close()
-        
-        # 兼容原有格式返回
-        return QuotaStatusResponse(
-            remaining=result['remaining_quota'],
-            total_used=0,  # 飞书API可能不返回总使用量
-            invite_active=False,  # 使用飞书官方支付后,邀请码功能可禁用
-            invite_expire_at=None,
-            total_paid=0  # 飞书API可能不返回总付费金额
-        )
-    except Exception as e:
-        print(f"获取配额状态失败: {str(e)}")
-        ensure_user_database(user_key)
-        user_db = get_user_session(user_key)
-        try:
-            return quota_service.get_quota_status(user_db, db, open_id, tenant_key)
-        finally:
-            user_db.close()
+        return quota_service.get_quota_status(user_db, db, open_id, tenant_key)
+    finally:
+        user_db.close()
 
 
 @router.get("/quota/check")
 def check_can_sign(open_id: str, tenant_key: str, db: Session = Depends(get_db)):
-    """
-    检查用户是否可以签名
-
-    改用飞书官方付费能力API进行权益校验；当需要降级到本地时，使用用户独立库中的配额。
-    """
-    from payment.feishu_official import feishu_payment_service
-
+    """检查用户是否可以签名"""
     user_key = f"{open_id}::{tenant_key}"
-
+    ensure_user_database(user_key)
+    user_db = get_user_session(user_key)
     try:
-        result = feishu_payment_service.check_user_paid_scope(open_id, tenant_key)
-
-        # 如果官方服务提示需要本地兜底，则走用户独立库
-        if result.get('use_local', False):
-            ensure_user_database(user_key)
-            user_db = get_user_session(user_key)
-            try:
-                chk = quota_service.check_can_sign(user_db, db, open_id, tenant_key)
-                return CanSignResponse(**chk)
-            finally:
-                user_db.close()
-
-        if result['is_need_pay']:
-            marketplace_url = feishu_payment_service.get_marketplace_url()
-            return CanSignResponse(
-                can_sign=False,
-                reason=f"请前往插件市场购买: {marketplace_url}",
-                consume_quota=False
-            )
-
-        if not result['has_permission']:
-            return CanSignResponse(
-                can_sign=False,
-                reason="配额已用完,请购买套餐",
-                consume_quota=False
-            )
-
-        return CanSignResponse(
-            can_sign=True,
-            reason=None,
-            consume_quota=True
-        )
-
-    except Exception as e:
-        print(f"飞书API调用失败: {str(e)}")
-        return CanSignResponse(
-            can_sign=False,
-            reason="系统错误,请稍后重试",
-            consume_quota=False
-        )
+        chk = quota_service.check_can_sign(user_db, db, open_id, tenant_key)
+        return CanSignResponse(**chk)
+    finally:
+        user_db.close()
 
 
 @router.post("/quota/consume")
 def consume_quota(open_id: str, tenant_key: str, file_token: str = None,
-                  file_name: str = None, db: Session = Depends(get_db)):
-    """
-    消耗一次配额(签名成功后调用)
-
-    默认改用飞书官方API进行配额扣减；当需要本地兜底(use_local)时，扣减用户独立库中的次数。
-    """
-    from payment.feishu_official import feishu_payment_service
-
+                  file_name: str = None, count: int = 1, db: Session = Depends(get_db)):
+    """消耗配额(签名成功后调用)"""
     user_key = f"{open_id}::{tenant_key}"
-
+    ensure_user_database(user_key)
+    user_db = get_user_session(user_key)
     try:
-        check_result = feishu_payment_service.check_user_paid_scope(open_id, tenant_key)
-
-        # 如果官方服务提示需要本地兜底，则走用户独立库扣减
-        if check_result.get('use_local', False):
-            ensure_user_database(user_key)
-            user_db = get_user_session(user_key)
-            try:
-                ok = quota_service.consume_quota(user_db, db, open_id, tenant_key, file_token, file_name)
-            finally:
-                user_db.close()
-
-            if not ok:
-                raise HTTPException(status_code=402, detail="NO_QUOTA")
-
-            return {"success": True}
-
-        if not check_result['has_permission']:
+        ok = quota_service.consume_quota(user_db, db, open_id, tenant_key, file_token, file_name, count)
+        if not ok:
             raise HTTPException(status_code=402, detail="NO_QUOTA")
-
-        success = feishu_payment_service.consume_quota(open_id, tenant_key, count=1)
-        if not success:
-            raise HTTPException(status_code=500, detail="扣减配额失败")
-
-        # 记录签名日志到共享库(可选)
-        quota_service.log_signature(db, open_id, tenant_key, file_token, file_name)
-
         return {"success": True}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"消耗配额失败: {str(e)}")
-        raise HTTPException(status_code=500, detail="系统错误")
+    finally:
+        user_db.close()
 
 
 # ==================== 邀请码 API ====================

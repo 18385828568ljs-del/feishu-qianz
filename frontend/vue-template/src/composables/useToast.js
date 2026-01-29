@@ -1,12 +1,8 @@
 /**
  * Toast 通知组合式函数
- * 提供全局 Toast 通知功能
+ * 提供全局 Toast 通知功能 (基于 Element Plus ElMessage)
  */
-import { ref } from 'vue'
-
-// 响应式状态
-const toastMessage = ref('')
-const toastType = ref('info') // 'success' | 'error' | 'warning' | 'info'
+import { ElMessage } from 'element-plus'
 
 /**
  * 显示 Toast 通知
@@ -15,25 +11,28 @@ const toastType = ref('info') // 'success' | 'error' | 'warning' | 'info'
  * @param {number} duration - 显示时长（毫秒）
  */
 function showToast(message, type = 'info', duration = 2000) {
-    toastMessage.value = message
-    toastType.value = type
-    setTimeout(() => {
-        toastMessage.value = ''
-    }, duration)
+    ElMessage({
+        message,
+        type,
+        duration,
+        grouping: true,
+        showClose: true
+    })
 }
 
 /**
- * 清除 Toast
+ * 清除 Toast (ElMessage 自动管理，保留函数仅为兼容)
  */
 function clearToast() {
-    toastMessage.value = ''
+    ElMessage.closeAll()
 }
 
 export function useToast() {
     return {
-        toastMessage,
-        toastType,
         showToast,
-        clearToast
+        clearToast,
+        // 保留空ref以兼容旧代码解构，虽然不再使用
+        toastMessage: { value: '' },
+        toastType: { value: 'info' }
     }
 }

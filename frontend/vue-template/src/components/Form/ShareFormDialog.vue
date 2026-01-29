@@ -4,7 +4,7 @@
 -->
 <script setup>
 import { defineProps, defineEmits, watch, ref, computed } from 'vue'
-import { ElDialog, ElInput, ElButton } from 'element-plus'
+import { ElDialog, ElInput, ElButton, ElMessageBox } from 'element-plus'
 import { useShareForm } from '@/composables/useShareForm'
 import { getRecordCount } from '@/services/api'
 
@@ -48,8 +48,73 @@ const {
   handleCreateShareForm,
   copyShareUrl,
   getFieldTypeName,
-  resetShareForm
+  resetShareForm,
+  formList,
+  loadingList,
+  loadHistory
 } = useShareForm()
+
+const activeTab = ref('create') // 'create' | 'list'
+
+function switchTab(tab) {
+  activeTab.value = tab
+  if (tab === 'list') {
+    loadHistory(props.userKey)
+  }
+}
+
+function formatDate(ts) {
+  if (!ts) return ''
+  return new Date(ts * 1000).toLocaleString()
+}
+
+// 列表中的复制
+function copyLink(formId) {
+  // 生成正确的分享链接
+  const shareUrl = `${window.location.protocol}//${window.location.host}/sign?id=${formId}`
+  
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(shareUrl).then(() => {
+        showToast('链接已复制', 'success')
+    }).catch(() => {
+       showToast('复制失败', 'error') 
+    })
+  } else {
+     // 简单回退
+     showToast('请手动复制链接', 'warning')
+  }
+}
+
+// 清空表单列表
+async function clearAllForms() {
+  if (formList.value.length === 0) return
+  
+  try {
+    await ElMessageBox.confirm(
+      `确定要清空所有表单记录（共 ${formList.value.length} 条）吗？此操作不可恢复！`,
+      '清空确认',
+      {
+        confirmButtonText: '确定清空',
+        cancelButtonText: '取消',
+        type: 'warning',
+      }
+    )
+    
+    // 调用后端API删除所有表单
+    const { clearAllForms: clearAllFormsAPI } = await import('@/services/api')
+    await clearAllFormsAPI(props.userKey)
+    
+    // 清空前端显示
+    formList.value = []
+    showToast('列表已清空', 'success')
+  } catch (e) {
+    // 用户取消或出错
+    if (e !== 'cancel') {
+      console.error('清空失败:', e)
+      showToast('清空失败', 'error')
+    }
+  }
+}
 
 // 记录数量
 const recordCount = ref(0)
@@ -167,6 +232,9 @@ function handleClose() {
 // 监听弹窗打开
 watch(() => props.modelValue, (newVal) => {
   if (newVal) {
+    // 默认打开创建页，但如果上次是在列表页且想保持状态也可以
+    // 这里选择每次打开重置为创建页，或者根据需求保留
+    activeTab.value = 'create' 
     resetShareForm()
     loadFields()
   }
@@ -187,15 +255,34 @@ watch(recordOptions, (newOptions) => {
   <el-dialog 
     :model-value="modelValue" 
     @update:model-value="$emit('update:modelValue', $event)"
-    width="92%" 
+    width="90%" 
     center 
+    align-center
+    append-to-body
     :show-close="false" 
     @close="handleClose"
     class="share-form-dialog"
   >
     <template #header>
       <div class="dialog-header-clean">
-        <div class="header-title">{{ showFieldSelector ? '选择表单字段' : '创建分享表单' }}</div>
+        <!-- 简单的 Tab 切换 -->
+        <div class="header-tabs">
+          <div 
+            class="header-tab" 
+            :class="{ active: activeTab === 'create' }"
+            @click="switchTab('create')"
+          >
+            创建表单
+          </div>
+          <div 
+            class="header-tab" 
+            :class="{ active: activeTab === 'list' }"
+            @click="switchTab('list')"
+          >
+            表单队列
+          </div>
+        </div>
+        
         <button class="close-btn-clean" @click="handleClose">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M18 6 6 18M6 6l12 12"/>
@@ -205,8 +292,42 @@ watch(recordOptions, (newOptions) => {
     </template>
     
     <div class="dialog-content-clean">
+      <!-- 历史列表视图 -->
+      <div v-if="activeTab === 'list'" class="history-view">
+         <!-- 清空按钮 -->
+         <div v-if="formList.length > 0" class="list-header">
+           <button class="clear-all-btn" @click="clearAllForms">
+             清空列表
+           </button>
+         </div>
+         
+         <div v-if="loadingList" class="loading-fields">
+            <div class="spinner-small"></div>
+            <span>加载历史记录...</span>
+         </div>
+         <div v-else-if="formList.length === 0" class="no-fields">
+            <p>暂无已创建的表单</p>
+         </div>
+         <div v-else class="history-list">
+            <div v-for="form in formList" :key="form.form_id" class="history-item">
+              <div class="history-info">
+                <div class="history-name">{{ form.name }}</div>
+                <div class="history-meta">
+                  {{ formatDate(form.created_at) }} · {{ form.submit_count }} 次提交
+                </div>
+              </div>
+              <button 
+                class="copy-btn-small" 
+                @click="copyLink(form.form_id)"
+              >
+                复制链接
+              </button>
+            </div>
+         </div>
+      </div>
+
       <!-- 成功结果 -->
-      <div v-if="generatedShareUrl" class="share-result">
+      <div v-else-if="generatedShareUrl" class="share-result">
         <div class="success-icon-mini">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg>
         </div>
@@ -219,7 +340,7 @@ watch(recordOptions, (newOptions) => {
       </div>
       
       <!-- 步骤1：基本信息 -->
-      <div v-else-if="!showFieldSelector">
+      <div v-else-if="activeTab === 'create' && !showFieldSelector">
         <p class="dialog-subtitle">创建一个可分享的表单，外部用户无需登录即可填写</p>
         <el-input v-model="shareFormName" placeholder="请输入表单名称" size="large" class="styled-input" />
         <el-input v-model="shareFormDesc" placeholder="表单描述（可选）" size="large" class="styled-input" style="margin-top: 12px;" />
@@ -445,6 +566,93 @@ watch(recordOptions, (newOptions) => {
 .url-input { flex: 1; padding: 12px; background: #f5f5f7; border: none; border-radius: 10px; color: #86868b; }
 .copy-btn { background: #007aff; color: #fff; border: none; padding: 0 20px; border-radius: 10px; font-weight: 600; cursor: pointer; }
 .result-hint { font-size: 13px; color: #86868b; }
+
+/* Tab 样式 */
+.header-tabs {
+  display: flex;
+  background: #f5f5f7;
+  padding: 4px;
+  border-radius: 10px;
+}
+.header-tab {
+  padding: 6px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #86868b;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: all 0.2s;
+}
+.header-tab.active {
+  background: #fff;
+  color: #1d1d1f;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  font-weight: 600;
+}
+
+/* 历史列表样式 */
+.history-view {
+  min-height: 200px;
+}
+.history-list {
+  max-height: 380px;
+  overflow-y: auto;
+}
+.history-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px;
+  border-bottom: 1px solid #f0f0f2;
+}
+.history-item:last-child {
+  border-bottom: none;
+}
+.history-name {
+  font-weight: 600;
+  font-size: 15px;
+  color: #1d1d1f;
+  margin-bottom: 4px;
+}
+.history-meta {
+  font-size: 12px;
+  color: #86868b;
+}
+.copy-btn-small {
+  padding: 6px 14px;
+  background: #f5f5f7;
+  color: #007aff;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.list-header {
+  padding: 12px 16px;
+  display: flex;
+  justify-content: flex-end;
+  border-bottom: 1px solid #f0f0f2;
+}
+.clear-all-btn {
+  padding: 6px 14px;
+  background: #fff;
+  color: #f56c6c;
+  border: 1px solid #f56c6c;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.clear-all-btn:hover {
+  background: #fef0f0;
+}
+
+.copy-btn-small:hover {
+  background: #e8f2ff;
+}
 
 /* 基础输入框 */
 /* 基础输入框 */

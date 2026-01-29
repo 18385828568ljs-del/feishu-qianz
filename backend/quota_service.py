@@ -236,9 +236,11 @@ def consume_quota(
     tenant_key: str,
     file_token: str = None,
     file_name: str = None,
+    count: int = 1,
 ) -> bool:
-    """消耗一次配额。
-
+    """消耗配额。
+    
+    - count: 消耗数量，默认为 1
     - 扣减发生在用户库 user_profile
     - 仍然把签名日志写到共享库 signature_logs（保持其它不变）
     """
@@ -254,13 +256,14 @@ def consume_quota(
         quota_consumed = False
     elif user.is_unlimited:
         quota_consumed = False
-    elif user.remaining_quota > 0:
-        user.remaining_quota -= 1
+    elif user.remaining_quota >= count:
+        user.remaining_quota -= count
         quota_consumed = True
     else:
+        # 余额不足
         return False
 
-    user.total_used += 1
+    user.total_used += count
     user_db.commit()
 
     # 共享库日志仍保留

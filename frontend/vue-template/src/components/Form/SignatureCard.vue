@@ -27,7 +27,7 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['confirm', 'fileSelect'])
+const emit = defineEmits(['confirm', 'fileSelect', 'batchConfirm'])
 
 // 是否为签名模式
 const isSignatureMode = computed(() => props.mode === 'signature')
@@ -48,13 +48,17 @@ function handleConfirm(blob) {
   emit('confirm', blob)
 }
 
+function handleBatchConfirm(blob) {
+  emit('batchConfirm', blob)
+}
+
 function handleFileSelect(file) {
   emit('fileSelect', file)
 }
 </script>
 
 <template>
-  <div class="main-card" :class="{ 'disabled-card': !hasSelection }">
+  <div class="main-card" :class="{ 'disabled-card': !hasSelection || !hasAttachField }">
     <!-- 卡片头部 -->
     <div class="card-header">
       <div class="header-left">
@@ -63,8 +67,8 @@ function handleFileSelect(file) {
         </svg>
         <span class="header-title">{{ title }}</span>
       </div>
-      <span class="status-chip" :class="{ 'status-ready': hasSelection }">
-        {{ hasSelection ? '就绪' : '未选中' }}
+      <span class="status-chip" :class="{ 'status-ready': hasSelection && hasAttachField }">
+        {{ (hasSelection && hasAttachField) ? '就绪' : (!hasAttachField ? '不可用' : '未选中') }}
       </span>
     </div>
     
@@ -72,20 +76,20 @@ function handleFileSelect(file) {
     <div class="content-area">
       <!-- 签名模式 -->
       <div v-if="isSignatureMode" class="canvas-area">
-        <SignaturePad @confirm="handleConfirm" />
+        <SignaturePad @confirm="handleConfirm" @batchConfirm="handleBatchConfirm" />
       </div>
       
       <!-- 上传模式 -->
       <div v-else class="upload-area-wrapper">
         <FileUpload 
-          :disabled="!hasSelection"
+          :disabled="!hasSelection || !hasAttachField"
           @select="handleFileSelect"
         />
       </div>
     </div>
     
-    <!-- 未选中遮罩 -->
-    <div class="overlay" v-if="!hasSelection">
+    <!-- 未选中遮罩 (仅在未选中行时显示) -->
+    <div class="overlay" v-if="!hasSelection && hasAttachField">
       <div class="overlay-box">
         <svg class="overlay-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
           <rect x="3" y="3" width="18" height="18" rx="2"/>
@@ -181,6 +185,9 @@ function handleFileSelect(file) {
   display: flex;
   align-items: center;
   justify-content: center;
+  z-index: 10;
+  pointer-events: all;
+  cursor: not-allowed;
 }
 
 .overlay-box {

@@ -19,8 +19,6 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-APP_ID = os.getenv("APP_ID", "")
-APP_SECRET = os.getenv("APP_SECRET", "")
 PARENT_TYPE = os.getenv("PARENT_TYPE", "explorer")  # explorer | folder
 PARENT_NODE = os.getenv("PARENT_NODE", "root")       # root or folder_token
 BACKEND_BASE = os.getenv("BACKEND_BASE", "http://localhost:8000")
@@ -149,12 +147,14 @@ USER_TOKENS = {}
 
 @app.post("/api/sign/upload", tags=["签名"], summary="上传签名文件")
 async def upload_signature(
+    request: Request,
     file: UploadFile = File(..., description="签名图片文件"),
     open_id: str = Form(..., description="用户 open_id"),
     tenant_key: str = Form(..., description="租户 key"),
     file_name: str = Form("signature.png", description="文件名"),
     folder_token: Optional[str] = Form(None, description="目标文件夹 token"),
     has_quota: int = Form(0, description="飞书官方付费权益 (1=有权益, 0=无)"),
+    db: Session = Depends(get_db),  # 注入共享库会话
 ):
     """
     上传签名文件到飞书云空间（使用授权码模式）。
@@ -177,6 +177,7 @@ async def upload_signature(
         ensure_user_database(user_key)
         user_db = get_user_session(user_key)
         try:
+            # 传入 shared_db (db)
             chk = quota_service.check_can_sign(user_db, db, open_id, tenant_key)
             if not chk["can_sign"]:
                 raise HTTPException(status_code=402, detail="NO_QUOTA")
@@ -187,25 +188,30 @@ async def upload_signature(
         logger.warning("Database not available, skipping quota check")
         consume_quota_after = False
 
-    # 2) 保存本地存档
+    # 2) 读取文件内容 (不再保存本地存档)
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="EMPTY_FILE")
-    try:
-        uploads_dir = os.path.join(os.path.dirname(__file__), 'uploads')
-        os.makedirs(uploads_dir, exist_ok=True)
-        base, ext = os.path.splitext(file_name)
-        safe_ext = ext if ext else '.png'
-        ts = int(time.time() * 1000)
-        local_name = f"{base}_{ts}{safe_ext}"
-        local_path = os.path.join(uploads_dir, local_name)
-        with open(local_path, 'wb') as f_out:
-            f_out.write(content)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"save local failed: {e}")
+    
+    local_path = None  # 不再使用本地路径
 
     # 3) 构建上传请求
-    headers = auth_service.get_base_authorization_header()
+    # 从请求头获取用户的授权码
+    user_base_token = request.headers.get('X-Base-Token', '')
+    if not user_base_token:
+        logger.error(f"No base token provided for user {open_id}")
+        raise HTTPException(
+            status_code=401, 
+            detail="未提供授权码，请先在插件中配置您的飞书授权码"
+        )
+    
+    logger.info(f"Using user-provided base token for {open_id}")
+    
+    try:
+        headers = auth_service.get_base_authorization_header(user_base_token)
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    
     parent_type = "explorer"
     parent_node = ""
 
@@ -214,13 +220,14 @@ async def upload_signature(
         parent_node = folder_token
         logger.info(f"Using provided folder_token: {folder_token}")
     else:
-        # 使用个人空间根目录 (授权码模式下 drive 接口支持上传到素材)
+        # 使用个人空间根目录
         logger.info("Using personal space root directory")
         parent_type = "explorer"
         parent_node = ""
 
-    # 使用授权码专用的域名
-    url_upload = auth_service.get_base_api_url("/open-apis/drive/v1/files/upload_all")
+
+    # 使用 Open API 域名（Drive API 专用）
+    url_upload = auth_service.get_open_api_url("/open-apis/drive/v1/files/upload_all")
     
     file_size = len(content)
     form_data = {
@@ -245,13 +252,24 @@ async def upload_signature(
             timeout=30
         )
         logger.info(f"Feishu response: status={r.status_code}")
+        if r.status_code != 200:
+            # 记录详细错误信息
+            try:
+                error_data = r.json()
+                logger.error(f"Feishu API error details: {error_data}")
+            except:
+                logger.error(f"Feishu API error (non-JSON): {r.text[:500]}")
     except Exception as e:
         logger.error(f"Upload request exception: {str(e)}")
         raise HTTPException(status_code=500, detail=f"upload request failed: {str(e)}")
 
     # 4) 解析响应
     if r.status_code != 200:
-        raise HTTPException(status_code=500, detail=f"upload_all failed: status={r.status_code}")
+        try:
+            error_detail = r.json()
+        except:
+            error_detail = r.text[:200]
+        raise HTTPException(status_code=500, detail=f"upload_all failed: status={r.status_code}, detail={error_detail}")
     
     try:
         data = r.json()
