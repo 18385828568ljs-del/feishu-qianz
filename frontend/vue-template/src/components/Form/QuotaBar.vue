@@ -29,11 +29,11 @@ function formatDate(timestamp) {
 // 计算进度百分比
 const progressPercent = computed(() => {
   if (props.quota.isUnlimited || props.quota.inviteActive) return 100
-  // 总额逻辑：取 (剩余+已用) 和 (套餐额度) 中的较大值
-  // 这样既能兼容免费试用用户(可能是100)，也能兼容充值用户
-  const total = Math.max(props.quota.remaining + props.quota.totalUsed, props.quota.planQuota || 100)
+  // 总额逻辑：使用 (剩余 + 已用) 作为总额，这样在消耗时总额保持不变，且能正确反映叠加后的总容量
+  const total = (props.quota.remaining || 0) + (props.quota.totalUsed || 0)
   const remaining = props.quota.remaining || 0
-  return Math.min(100, Math.max(0, (remaining / total) * 100))
+  // 为避免分母为0或异常，取 Math.max(total, 1)
+  return Math.min(100, Math.max(0, (remaining / Math.max(total, 1)) * 100))
 })
 
 // 进度条颜色：根据剩余百分比变化
@@ -47,16 +47,8 @@ const progressColor = computed(() => {
 
 <template>
   <div class="quota-bar">
-    <!-- VIP 状态 -->
-    <div class="quota-info" v-if="quota.inviteActive">
-      <svg class="vip-icon" viewBox="0 0 24 24" fill="currentColor">
-        <path d="M12 2L9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61z"/>
-      </svg>
-      <span class="vip-text">VIP · {{ formatDate(quota.inviteExpireAt) }} 到期</span>
-    </div>
-    
     <!-- 不限次数 -->
-    <div class="quota-info unlimited" v-else-if="quota.isUnlimited">
+    <div class="quota-info unlimited" v-if="quota.isUnlimited">
       <div class="unlimited-row">
         <svg class="unlimited-icon" viewBox="0 0 24 24" fill="currentColor">
           <path d="M18.6 6.62c-1.44 0-2.8.56-3.77 1.53L12 10.66 10.48 12h.01L7.8 14.39c-.64.64-1.49.99-2.4.99-1.87 0-3.39-1.51-3.39-3.38S3.53 8.62 5.4 8.62c.91 0 1.76.35 2.44 1.03l1.13 1 1.51-1.34L9.22 8.2C8.2 7.18 6.84 6.62 5.4 6.62 2.42 6.62 0 9.04 0 12s2.42 5.38 5.4 5.38c1.44 0 2.8-.56 3.77-1.53l2.83-2.5.01.01L13.52 12h-.01l2.69-2.39c.64-.64 1.49-.99 2.4-.99 1.87 0 3.39 1.51 3.39 3.38s-1.52 3.38-3.39 3.38c-.9 0-1.76-.35-2.44-1.03l-1.14-1.01-1.51 1.34 1.27 1.12c1.02 1.01 2.37 1.57 3.82 1.57 2.98 0 5.4-2.41 5.4-5.38s-2.42-5.37-5.4-5.37z"/>
@@ -66,15 +58,19 @@ const progressColor = computed(() => {
       </div>
     </div>
     
-    <!-- 普通额度进度条 -->
+    <!-- 普通额度进度条 (含体验权益) -->
     <div class="quota-progress-wrapper" v-else>
       <div class="quota-header">
         <span class="quota-label">剩余额度</span>
-        <span v-if="quota.planExpiresAt" class="expire-center">{{ formatDate(quota.planExpiresAt) }} 到期</span>
+        
+        <!-- 居中显示的到期时间 -->
+        <span v-if="quota.inviteActive" class="expire-center">{{ formatDate(quota.inviteExpireAt) }} 到期</span>
+        <span v-else-if="quota.planExpiresAt" class="expire-center">{{ formatDate(quota.planExpiresAt) }} 到期</span>
+        
         <div class="quota-values">
           <span class="quota-text">剩余: {{ quota.remaining }}</span>
           <span class="quota-divider">/</span>
-          <span class="quota-text">总额: {{ Math.max(quota.remaining + quota.totalUsed, quota.planQuota || 100) }}</span>
+          <span class="quota-text">总额: {{ (quota.remaining || 0) + (quota.totalUsed || 0) }}</span>
         </div>
       </div>
       <div class="quota-progress-bar">

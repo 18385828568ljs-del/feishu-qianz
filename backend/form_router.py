@@ -14,6 +14,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from database import get_db, SignForm
+import quota_service
+from user_db_manager import ensure_user_database, get_user_session
 
 router = APIRouter(
     prefix="/api/form", 
@@ -863,6 +865,28 @@ async def submit_form(
             else:
                 raise e  # 其他错误，直接抛出
         
+        # 扣除创建者的配额
+        user_key = form.created_by
+        if user_key:
+            ensure_user_database(user_key)
+            user_db = get_user_session(user_key)
+            try:
+                open_id_val, tenant_key_val = user_key.split("::")
+                # 消耗 1 次额度
+                ok = quota_service.consume_quota(
+                    user_db, 
+                    db, 
+                    open_id=open_id_val, 
+                    tenant_key=tenant_key_val, 
+                    file_token=file_token,
+                    file_name=f"外链表单签名_{form_id}.png"
+                )
+                if not ok:
+                    log_to_file(f"[Form Submit] Quota insufficient for user {user_key}")
+                    raise HTTPException(status_code=402, detail="NO_QUOTA")
+            finally:
+                user_db.close()
+
         # 更新提交计数
         form.submit_count += 1
         db.commit()

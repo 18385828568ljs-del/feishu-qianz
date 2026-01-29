@@ -23,6 +23,7 @@ import InviteDialog from './InviteDialog.vue'
 import RechargeDialog from './RechargeDialog.vue'
 import ShareFormDialog from './ShareFormDialog.vue'
 import BaseTokenDialog from './BaseTokenDialog.vue'
+import BatchSelectDialog from './BatchSelectDialog.vue'
 
 // 使用 Composables
 const { toastMessage, toastType, showToast } = useToast()
@@ -52,6 +53,10 @@ const showInviteDialog = ref(false)
 const showRechargeDialog = ref(false)
 const showShareFormDialog = ref(false)
 const showBaseTokenDialog = ref(false)
+const showBatchSelectDialog = ref(false) // 批量选择弹窗
+const batchCandidateRecords = ref([]) // 待选记录列表
+const batchSelectLoading = ref(false)
+const currentBatchBlob = ref(null) // 暂存的签名Blob
 const activeButton = ref('')
 
 // 批量操作进度状态
@@ -247,6 +252,7 @@ async function uploadToField(fileOrBlob, fileName, mimeType) {
 }
 
 // 批量签名确认
+// 批量签名确认
 async function onBatchConfirm(blob) {
   if (!state.value.tableId || !state.value.attachFieldId) {
     showToast('未获取到表信息或附件字段', 'warning')
@@ -256,35 +262,111 @@ async function onBatchConfirm(blob) {
     showToast('请先点击上方"授权码"按钮，配置您的授权码', 'warning')
     return
   }
+  
+  // 检查额度
+  if (!canSign.value) {
+    showToast('您的额度已用完，无法执行批量操作', 'error')
+    showRechargeDialog.value = true
+    return
+  }
 
   try {
+    batchSelectLoading.value = true
     const table = await bitable.base.getTableById(state.value.tableId)
-    const recordIdList = await table.getRecordIdList()
+    
+    // 获取当前视图（优先使用视图下的记录，保持筛选结果）
+    const selection = await bitable.base.getSelection()
+    let recordIdList = []
+    let isViewOrder = false
+    
+    if (selection && selection.viewId) {
+      try {
+        const view = await table.getView(selection.viewId)
+        recordIdList = await view.getVisibleRecordIdList()
+        isViewOrder = true
+      } catch (e) {
+        console.warn('获取视图失败', e)
+      }
+    } 
+    
+    // 如果获取视图失败，尝试使用第一个视图
+    if (!isViewOrder) {
+        try {
+            const viewList = await table.getViewList()
+            if (viewList.length > 0) {
+               const firstView = viewList[0]
+               recordIdList = await firstView.getVisibleRecordIdList()
+               console.log('Using first view as fallback')
+            } else {
+               recordIdList = await table.getRecordIdList()
+            }
+        } catch (e) {
+            recordIdList = await table.getRecordIdList()
+        }
+    }
+    
+    // 如果还是没有获取到，或者回退到了全表，提示用户
+    // 其实 getRecordIdList 往往是乱序的，所以我们尽量避免
     
     if (recordIdList.length === 0) {
-      showToast('表格中没有记录', 'warning')
+      batchSelectLoading.value = false
+      showToast('当前视图中没有记录', 'warning')
       return
     }
 
-    // 确认对话框
-    const confirmed = await ElMessageBox.confirm(
-      `确定要将签名填充到整列（共 ${recordIdList.length} 行）吗？`,
-      '批量确认',
-      {
-        confirmButtonText: '确定',
-        cancelButtonText: '取消',
-        type: 'warning',
+    // 限制加载数量防止卡顿
+    const MAX_LOAD = 500
+    const targetIds = recordIdList.slice(0, MAX_LOAD)
+    
+    // 生成序号名称 (记录条1, 记录条2...)
+    const loadedRecords = targetIds.map((rid, index) => ({
+      id: rid, 
+      name: `记录条${index + 1}`
+    }))
+    
+    batchCandidateRecords.value = loadedRecords
+    
+    // 暂存 Blob
+    currentBatchBlob.value = blob
+    
+    // 打开选择弹窗
+    batchSelectLoading.value = false
+    showBatchSelectDialog.value = true
+
+  } catch (e) {
+    batchSelectLoading.value = false
+    console.error('Batch Prepare Error:', e)
+    showToast('准备批量数据失败', 'error')
+  }
+}
+
+// 处理选择完成
+function handleBatchSelectionConfirmed(selectedRecordIds) {
+  if (!selectedRecordIds || selectedRecordIds.length === 0) return
+  
+  // 再次检查额度是否足够
+  if (!quota.value.inviteActive && !quota.value.isUnlimited) {
+      if (quota.value.remaining < selectedRecordIds.length) {
+          ElMessage.error(`您的剩余额度 (${quota.value.remaining}) 不足于支付本次批量操作 (${selectedRecordIds.length} 条)`)
+          showRechargeDialog.value = true
+          return
       }
-    ).catch(() => false)
+  }
+  
+  executeBatchFill(selectedRecordIds, currentBatchBlob.value)
+}
 
-    if (!confirmed) return
-
+// 执行批量填充
+async function executeBatchFill(recordIdList, blob) {
+  try {
     // 重置状态
     batchCancelled.value = false
     batchProgress.value = { current: 0, total: recordIdList.length }
     showBatchProgressDialog.value = true
 
     state.value.loading = true
+    const table = await bitable.base.getTableById(state.value.tableId)
+    
     const fileName = `signature_batch_${Date.now()}.png`
     const file = new File([blob], fileName, { type: 'image/png' })
     
@@ -296,21 +378,21 @@ async function onBatchConfirm(blob) {
     
     // 批量填充
     for (let i = 0; i < recordIdList.length; i++) {
-      // 检查是否取消
-      if (batchCancelled.value) {
-        break
-      }
+        // 检查是否取消
+        if (batchCancelled.value) {
+            break
+        }
 
-      try {
-        await table.setCellValue(state.value.attachFieldId, recordIdList[i], cell.val)
-        successCount++
-      } catch (e) {
-        console.error(`[Batch] Failed to fill record ${recordIdList[i]}:`, e)
-        failCount++
-      }
-      
-      // 更新进度
-      batchProgress.value.current = i + 1
+        try {
+            await table.setCellValue(state.value.attachFieldId, recordIdList[i], cell.val)
+            successCount++
+        } catch (e) {
+            console.error(`[Batch] Failed to fill record ${recordIdList[i]}:`, e)
+            failCount++
+        }
+        
+        // 更新进度
+        batchProgress.value.current = i + 1
     }
     
     state.value.loading = false
@@ -319,7 +401,6 @@ async function onBatchConfirm(blob) {
     // 消耗配额（批量操作按成功次数计算）
     if (!quota.value.inviteActive && successCount > 0) {
       try {
-        // 这里简化处理，实际可能需要调整配额消耗策略
         await consumeQuota(userInfo.value.openId, userInfo.value.tenantKey, 'batch_upload', 'batch_records', successCount)
       } catch (err) {
         console.warn('[Quota] Failed to consume quota:', err)
@@ -350,7 +431,7 @@ async function onBatchConfirm(blob) {
   } catch (e) {
     state.value.loading = false
     showBatchProgressDialog.value = false
-    if (e !== false) { // 不是取消操作
+    if (e !== false) {
       console.error('[Batch] Error:', e)
       const errorMsg = e?.response?.data?.detail || e?.message || String(e)
       showToast(`批量填充失败：${errorMsg}`, 'error', 3000)
@@ -480,6 +561,14 @@ onUnmounted(() => {
       v-model="showBaseTokenDialog"
       @close="onDialogClose"
       @saved="() => showToast('授权码已保存', 'success')"
+    />
+
+    <!-- 批量记录选择弹窗 -->
+    <BatchSelectDialog
+      v-model="showBatchSelectDialog"
+      :records="batchCandidateRecords"
+      :loading="batchSelectLoading"
+      @confirm="handleBatchSelectionConfirmed"
     />
 
     <!-- 批量填充进度对话框 -->

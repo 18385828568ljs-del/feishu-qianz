@@ -17,7 +17,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
 
-from database import get_db, User, InviteCode, Order, SignatureLog, SignForm, PricingPlan
+from database import get_db, User, InviteCode, Order, SignatureLog, SignForm, PricingPlan, UserProfile
+from user_db_manager import get_user_session, ensure_user_database
+
 
 # 密码文件路径
 PASSWORD_FILE = os.path.join(os.path.dirname(__file__), "admin_password.json")
@@ -429,7 +431,61 @@ def delete_user(
 
     db.delete(user)
     db.commit()
-    return {"success": True, "message": "用户已删除"}
+
+@router.post("/users/{user_id}/reset", summary="初始化/重置用户数据")
+def reset_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_admin),
+):
+    """重置用户数据（包括配额、邀请码、已用次数等）"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    # 1. 处理旧的邀请码计数（如果需要）
+    if user.invite_code_used:
+        old_invite = db.query(InviteCode).filter(InviteCode.code == user.invite_code_used).first()
+        if old_invite and old_invite.used_count > 0:
+            old_invite.used_count -= 1
+    
+    # 2. 重置用户库状态
+    try:
+        ensure_user_database(user.user_key)
+        user_db = get_user_session(user.user_key)
+        
+        if "::" in user.user_key:
+            open_id_val, tenant_key_val = user.user_key.split("::")
+            user_profile = user_db.query(UserProfile).filter(
+                UserProfile.open_id == open_id_val,
+                UserProfile.tenant_key == tenant_key_val
+            ).first()
+            
+            if user_profile:
+                user_profile.remaining_quota = 20  # 恢复默认 20 次
+                user_profile.total_used = 0
+                user_profile.invite_code_used = None
+                user_profile.invite_expire_at = None
+                user_profile.current_plan_id = None  # 清除套餐
+                user_profile.plan_expires_at = None
+                user_profile.plan_quota_reset_at = None
+                user_profile.is_unlimited = False
+                user_db.commit()
+        user_db.close()
+    except Exception as e:
+        print(f"Failed to reset user profile for {user.user_key}: {e}")
+        # 这里不阻断，继续重置共享库
+
+    # 3. 重置共享库状态
+    user.remaining_quota = 20
+    user.total_used = 0
+    user.invite_code_used = None
+    user.invite_expire_at = None
+    user.total_paid = 0
+    
+    db.commit()
+    
+    return {"success": True, "message": "用户数据已初始化"}
 
 
 @router.delete("/users/{user_id}/invite", summary="清理用户邀请码记录")
@@ -738,9 +794,32 @@ def update_invite_status(
     if not is_active and revoke_benefits:
         affected_users = db.query(User).filter(User.invite_code_used == invite.code).all()
         for user in affected_users:
+            # 1. 更新共享库 legacy 状态（保留原有逻辑）
             if user.invite_expire_at:
                 user.invite_expire_at = None
                 revoked_count += 1
+            
+            # 2. 更新独立用户库状态
+            try:
+                ensure_user_database(user.user_key)
+                user_db = get_user_session(user.user_key)
+                # 分解 open_id 和 tenant_key
+                # user_key format: "open_id::tenant_key"
+                if "::" in user.user_key:
+                    open_id_val, tenant_key_val = user.user_key.split("::")
+                    user_profile = user_db.query(UserProfile).filter(
+                        UserProfile.open_id == open_id_val,
+                        UserProfile.tenant_key == tenant_key_val
+                    ).first()
+                    
+                    if user_profile and user_profile.invite_code_used == invite.code:
+                        user_profile.invite_expire_at = None
+                        # 如果需要连 invite_code_used 也清除，可以解开下行注释
+                        # user_profile.invite_code_used = None 
+                        user_db.commit()
+                user_db.close()
+            except Exception as e:
+                print(f"Failed to revoke benefit for user {user.user_key}: {e}")
 
     db.commit()
 

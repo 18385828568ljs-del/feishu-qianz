@@ -106,10 +106,24 @@ def validate_invite(req: InviteValidateRequest, db: Session = Depends(get_db)):
 @router.post("/invite/redeem")
 def redeem_invite(req: InviteRedeemRequest, db: Session = Depends(get_db)):
     """兑换邀请码"""
-    result = quota_service.redeem_invite_code(db, req.code, req.open_id, req.tenant_key)
-    if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error", "REDEEM_FAILED"))
-    return result
+    # 获取用户库会话
+    user_key = quota_service.get_user_key(req.open_id, req.tenant_key)
+    ensure_user_database(user_key)
+    user_db = get_user_session(user_key)
+    
+    try:
+        result = quota_service.redeem_invite_code(
+            shared_db=db, 
+            user_db=user_db, 
+            code=req.code, 
+            open_id=req.open_id, 
+            tenant_key=req.tenant_key
+        )
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "REDEEM_FAILED"))
+        return result
+    finally:
+        user_db.close()
 
 
 # ==================== 支付 API ====================

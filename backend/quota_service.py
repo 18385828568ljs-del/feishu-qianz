@@ -363,42 +363,51 @@ def validate_invite_code(shared_db: Session, code: str) -> Dict[str, Any]:
     }
 
 
-def redeem_invite_code(shared_db: Session, code: str, open_id: str, tenant_key: str) -> Dict[str, Any]:
-    """兑换邀请码（共享库保持不变；用户库是否记录 invite 状态暂不迁移）。"""
+def redeem_invite_code(
+    shared_db: Session, 
+    user_db: Session,  # 新增: 必须传入用户库会话
+    code: str, 
+    open_id: str, 
+    tenant_key: str
+) -> Dict[str, Any]:
+    """兑换邀请码（同时更新共享库和用户库）。"""
     validation = validate_invite_code(shared_db, code)
     if not validation["valid"]:
         return {"success": False, "error": validation["reason"]}
 
-    # 旧逻辑依赖 shared_db 的 users 表；为了“其它不变”，这里暂时保持原实现风格
-    # 如果后续你也希望 invite 状态迁移到用户库，再单独做一次迁移。
-    from database import User
-
-    user_key = get_user_key(open_id, tenant_key)
-    user = shared_db.query(User).filter(User.user_key == user_key).first()
-    if not user:
-        user = User(
-            open_id=open_id,
-            tenant_key=tenant_key,
-            user_key=user_key,
-            remaining_quota=0,
-            total_used=0,
-            total_paid=0,
-        )
-        shared_db.add(user)
-        shared_db.commit()
-        shared_db.refresh(user)
-
+    # 1. 获取/创建用户配置（在用户库）
+    user = get_or_create_user_profile(user_db, open_id, tenant_key)
+    
+    # 2. 检查是否正在生效
     if user.invite_code_used:
-        return {"success": False, "error": "ALREADY_USED_INVITE"}
+        # 如果当前有正在生效的邀请码，则不允许使用新码
+        if user.invite_expire_at and user.invite_expire_at > datetime.utcnow():
+            return {"success": False, "error": "ALREADY_USED_INVITE"}
+        # 如果已过期，允许覆盖使用新码
 
+    # 3. 获取邀请码信息（在共享库）
     invite = shared_db.query(InviteCode).filter(InviteCode.code == code).first()
-
+    
+    # 4. 更新用户状态（用户库）
     user.invite_code_used = code
     user.invite_expire_at = datetime.utcnow() + timedelta(days=invite.benefit_days)
+    user_db.commit()
 
+    # 5. 更新邀请码使用次数（共享库）
     invite.used_count += 1
-
     shared_db.commit()
+
+    # 6. 同时更新旧的共享库 user 表（为了兼容性，防止旧逻辑查询失败）
+    try:
+        from database import User
+        user_key = get_user_key(open_id, tenant_key)
+        legacy_user = shared_db.query(User).filter(User.user_key == user_key).first()
+        if legacy_user:
+            legacy_user.invite_code_used = code
+            legacy_user.invite_expire_at = user.invite_expire_at
+            shared_db.commit()
+    except Exception as e:
+        print(f"Update legacy user failed: {e}")
 
     return {
         "success": True,
