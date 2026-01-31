@@ -59,7 +59,7 @@ const activeTab = ref('create') // 'create' | 'list'
 function switchTab(tab) {
   activeTab.value = tab
   if (tab === 'list') {
-    loadHistory(props.userKey)
+    loadHistory()
   }
 }
 
@@ -73,15 +73,39 @@ function copyLink(formId) {
   // 生成正确的分享链接
   const shareUrl = `${window.location.protocol}//${window.location.host}/sign?id=${formId}`
   
-  if (navigator.clipboard && window.isSecureContext) {
-    navigator.clipboard.writeText(shareUrl).then(() => {
-        showToast('链接已复制', 'success')
-    }).catch(() => {
-       showToast('复制失败', 'error') 
-    })
+  // 使用 execCommand 方法（更兼容飞书环境）
+  const textarea = document.createElement('textarea')
+  textarea.value = shareUrl
+  textarea.style.position = 'fixed'
+  textarea.style.left = '-9999px'
+  textarea.style.top = '0'
+  textarea.setAttribute('readonly', '')
+  document.body.appendChild(textarea)
+  
+  // iOS 兼容
+  if (navigator.userAgent.match(/ipad|iphone/i)) {
+    const range = document.createRange()
+    range.selectNodeContents(textarea)
+    const selection = window.getSelection()
+    selection.removeAllRanges()
+    selection.addRange(range)
+    textarea.setSelectionRange(0, 999999)
   } else {
-     // 简单回退
-     showToast('请手动复制链接', 'warning')
+    textarea.select()
+  }
+  
+  try {
+    const successful = document.execCommand('copy')
+    document.body.removeChild(textarea)
+    
+    if (successful) {
+      showToast('链接已复制', 'success')
+    } else {
+      showToast('复制失败，请手动复制', 'error')
+    }
+  } catch (err) {
+    document.body.removeChild(textarea)
+    showToast('复制失败，请手动复制', 'error')
   }
 }
 
@@ -446,15 +470,16 @@ watch(recordOptions, (newOptions) => {
             </div>
 
             <!-- 必填开关 -->
-            <div class="card-actions">
-              <div 
-                 v-if="isFieldSelected(field.field_id)"
-                 class="required-badge"
-                 :class="{ 'is-required': selectedFields.find(f => f.field_id === field.field_id)?.required }"
-                 @click.stop="toggleRequired(field.field_id)"
-              >
-                必填
-              </div>
+            <div class="card-actions" v-if="isFieldSelected(field.field_id)">
+              <label class="required-switch" @click.stop>
+                <input
+                  type="checkbox"
+                  :checked="!!selectedFields.find(f => f.field_id === field.field_id)?.required"
+                  @change="toggleRequired(field.field_id)"
+                />
+                <span class="required-switch-ui"></span>
+                <span class="required-switch-text">必填</span>
+              </label>
             </div>
           </div>
           
@@ -846,13 +871,52 @@ input:checked + .slider:before { transform: translateX(20px); }
 .card-title { font-size: 15px; font-weight: 500; color: #1d1d1f; }
 .card-meta { font-size: 12px; color: #86868b; }
 
-.required-badge {
-  font-size: 12px; color: #98989d; background: #f2f2f7;
-  padding: 4px 8px; border-radius: 6px; font-weight: 500;
+.required-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+}
+
+.required-switch input {
+  display: none;
+}
+
+.required-switch-ui {
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: #e5e5ea;
+  position: relative;
   transition: all 0.2s;
 }
-.required-badge:hover { background: #e5e5ea; }
-.required-badge.is-required { color: #ff3b30; background: #ffebeb; }
+
+.required-switch-ui::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background: #fff;
+  border-radius: 50%;
+  transition: all 0.2s;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.12);
+}
+
+.required-switch input:checked + .required-switch-ui {
+  background: #ff3b30;
+}
+
+.required-switch input:checked + .required-switch-ui::after {
+  left: 18px;
+}
+
+.required-switch-text {
+  font-size: 12px;
+  color: #1d1d1f;
+  font-weight: 600;
+}
 
 /* 底部按钮 */
 .modern-footer { margin-top: 24px; display: flex; gap: 12px; }

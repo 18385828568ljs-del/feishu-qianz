@@ -16,7 +16,7 @@ from dateutil.relativedelta import relativedelta
 from database import InviteCode, Order, SignatureLog, PricingPlan, UserProfile
 
 # 新用户初始免费次数
-FREE_TRIAL_QUOTA = 100
+FREE_TRIAL_QUOTA = 20
 
 # 默认定价方案（数据库为空时自动初始化）
 # 固定套餐方案，不需要后台配置
@@ -94,9 +94,37 @@ def get_user_key(open_id: str, tenant_key: str) -> str:
 # ==================== 用户库（独立库）配额逻辑 ====================
 
 def get_or_create_user_profile(user_db: Session, open_id: str, tenant_key: str) -> UserProfile:
-    """在用户独立库中获取或创建 user_profile（每库默认只有一条）。"""
-    user = user_db.query(UserProfile).first()
+    """
+    在用户独立库中获取或创建 user_profile
+    
+    注意：每个用户独立数据库应该只有一条记录，因为数据库本身就是按用户隔离的
+    """
+    # 先尝试根据 open_id 和 tenant_key 精确查询
+    user = user_db.query(UserProfile).filter(
+        UserProfile.open_id == open_id,
+        UserProfile.tenant_key == tenant_key
+    ).first()
+    
     if not user:
+        # 如果没找到，检查是否有其他记录（可能是旧数据）
+        existing = user_db.query(UserProfile).first()
+        if existing:
+            # 发现不匹配的记录，这不应该发生
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Found mismatched profile in user DB: "
+                f"expected {open_id}::{tenant_key}, "
+                f"found {existing.open_id}::{existing.tenant_key}"
+            )
+            # 更新为正确的用户信息
+            existing.open_id = open_id
+            existing.tenant_key = tenant_key
+            user_db.commit()
+            user_db.refresh(existing)
+            return existing
+        
+        # 创建新记录
         user = UserProfile(
             open_id=open_id,
             tenant_key=tenant_key,
@@ -113,19 +141,7 @@ def get_or_create_user_profile(user_db: Session, open_id: str, tenant_key: str) 
         user_db.add(user)
         user_db.commit()
         user_db.refresh(user)
-    else:
-        # 如果库里已有记录，但 open_id/tenant_key 为空或不同，则更新为最新
-        updated = False
-        if open_id and user.open_id != open_id:
-            user.open_id = open_id
-            updated = True
-        if tenant_key and user.tenant_key != tenant_key:
-            user.tenant_key = tenant_key
-            updated = True
-        if updated:
-            user_db.commit()
-            user_db.refresh(user)
-
+    
     return user
 
 

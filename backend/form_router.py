@@ -9,13 +9,15 @@ import time
 from datetime import datetime
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from database import get_db, SignForm
 import quota_service
 from user_db_manager import ensure_user_database, get_user_session
+from auth_dependencies import get_current_user_info
 
 router = APIRouter(
     prefix="/api/form", 
@@ -65,7 +67,6 @@ class CreateFormRequest(BaseModel):
     signature_field_id: Optional[str] = None  # 签名字段（可选）
     fields: Optional[List[FieldConfig]] = None  # 表单字段列表
     extra_fields: Optional[List[FieldConfig]] = None  # 兼容旧版
-    created_by: Optional[str] = None
     base_token: Optional[str] = None  # 创建者的授权码
     record_index: Optional[int] = 1  # 记录条索引，默认为1
     show_data: Optional[bool] = False  # 是否在表单中显示关联记录的数据
@@ -102,15 +103,6 @@ def log_to_file(msg):
         pass
 
 
-def get_auth_token(base_token: Optional[str] = None) -> str:
-    """
-    统一获取鉴权 Token
-    
-    注意：不再使用全局默认授权码，必须提供 base_token
-    """
-    if not base_token:
-        raise ValueError("未提供授权码，无法进行操作")
-    return base_token
 
 def upload_to_bitable(app_token: str, file_data: bytes, file_name: str, base_token: str) -> str:
     """上传文件到多维表格并返回 file_token"""
@@ -264,13 +256,47 @@ def get_table_fields(app_token: str, table_id: str, base_token: str) -> list:
     return result["data"]["items"]
 
 
+def get_temp_download_url(file_token: str, base_token: str) -> Optional[str]:
+    """
+    获取飞书文件的临时下载链接
+    返回: 临时下载URL（有效期约1小时），失败返回None
+    """
+    try:
+        # 使用飞书 Drive API 获取临时下载链接
+        url = f"https://open.feishu.cn/open-apis/drive/v1/medias/{file_token}/download"
+        headers = auth_service.get_base_authorization_header(base_token)
+        
+        # 先尝试获取文件信息
+        resp = requests.get(url, headers=headers, allow_redirects=False, timeout=5)
+        
+        # 如果返回302重定向，说明有临时链接
+        if resp.status_code == 302:
+            return resp.headers.get('Location')
+        
+        # 如果返回200，说明可以直接下载（但这需要认证）
+        # 我们返回代理URL
+        return None
+        
+    except Exception as e:
+        log_to_file(f"[get_temp_download_url] Error: {e}")
+        return None
+
+
 # ==================== API 路由 ====================
 
 @router.get("/table-fields")
-def get_table_fields_api(app_token: str, table_id: str, base_token: Optional[str] = None):
-    """获取多维表格的字段列表"""
+def get_table_fields_api(
+    app_token: str, 
+    table_id: str, 
+    base_token: Optional[str] = None,
+    user_info: dict = Depends(get_current_user_info)
+):
+    """获取多维表格的字段列表（需要JWT认证）"""
     try:
-        token = get_auth_token(base_token)
+        # 使用用户提供的 base_token 或从配置获取
+        token = base_token
+        if not token:
+            raise ValueError("需要提供 base_token")
         raw_fields = get_table_fields(app_token, table_id, token)
         
         # 转换为前端可用格式
@@ -304,10 +330,18 @@ def get_table_fields_api(app_token: str, table_id: str, base_token: Optional[str
 
 
 @router.get("/record-count")
-def get_record_count_api(app_token: str, table_id: str, base_token: Optional[str] = None):
-    """获取多维表格的记录数量"""
+def get_record_count_api(
+    app_token: str, 
+    table_id: str, 
+    base_token: Optional[str] = None,
+    user_info: dict = Depends(get_current_user_info)
+):
+    """获取多维表格的记录数量（需要JWT认证）"""
     try:
-        token = get_auth_token(base_token)
+        # 使用用户提供的 base_token 或从配置获取
+        token = base_token
+        if not token:
+            raise ValueError("需要提供 base_token")
         records = get_bitable_records(app_token, table_id, token)
         return {"success": True, "count": len(records)}
     except ValueError:
@@ -318,11 +352,12 @@ def get_record_count_api(app_token: str, table_id: str, base_token: Optional[str
 
 
 @router.post("/create")
-def create_form(req: CreateFormRequest, db: Session = Depends(get_db)):
-    """创建外部签名表单"""
-    if not req.base_token:
-        raise HTTPException(status_code=401, detail="请提供授权码 (base_token)")
-    
+def create_form(
+    req: CreateFormRequest,
+    db: Session = Depends(get_db),
+    user_info: dict = Depends(get_current_user_info),
+):
+    """创建外部签名表单（需要JWT认证）"""
     form_id = generate_form_id()
     
     # 序列化字段配置
@@ -338,7 +373,7 @@ def create_form(req: CreateFormRequest, db: Session = Depends(get_db)):
             req.app_token,
             req.table_id,
             req.record_index,
-            req.base_token
+            None
         )
     
     form = SignForm(
@@ -349,8 +384,8 @@ def create_form(req: CreateFormRequest, db: Session = Depends(get_db)):
         table_id=req.table_id,
         signature_field_id=req.signature_field_id,
         extra_fields=extra_fields_json,
-        created_by=req.created_by,
-        creator_base_token=req.base_token,
+        created_by=str(user_info['user_id']),
+        creator_base_token=req.base_token,  # 保存创建者的授权码
         record_index=req.record_index or 1,
         record_id=cached_record_id,
         show_data=req.show_data or False
@@ -371,33 +406,27 @@ def create_form(req: CreateFormRequest, db: Session = Depends(get_db)):
 
 @router.delete("/clear-all", summary="清空当前用户的所有表单")
 def clear_all_forms(
-    created_by: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user_info: dict = Depends(get_current_user_info),
 ):
-    """
-    清空指定用户创建的所有表单
-    
-    - **created_by**: 用户唯一标识（格式: open_id::tenant_key）
-    """
+    """清空当前登录用户创建的所有表单（需要JWT认证）"""
     try:
-        # 查找该用户创建的所有表单
         forms = db.query(SignForm).filter(
-            SignForm.created_by == created_by,
-            SignForm.is_active == True
+            SignForm.created_by == str(user_info['user_id']),
+            SignForm.is_active == True,
         ).all()
-        
+
         deleted_count = len(forms)
-        
-        # 软删除所有表单
+
         for form in forms:
             form.is_active = False
             form.updated_at = datetime.utcnow()
-        
+
         db.commit()
-        
+
         return {
             "message": f"已清空 {deleted_count} 个表单",
-            "deleted_count": deleted_count
+            "deleted_count": deleted_count,
         }
     except Exception as e:
         db.rollback()
@@ -473,7 +502,12 @@ def get_form_record_data(form_id: str, db: Session = Depends(get_db)):
     # 使用创建者的授权码
     base_token = form.creator_base_token
     if not base_token:
-        raise HTTPException(status_code=401, detail="表单创建者未配置授权码")
+        # 如果没有授权码，返回空数据而不是报错（兼容旧表单）
+        return {
+            "success": True,
+            "data": {},
+            "message": "表单创建者未配置授权码，无法加载预填充数据"
+        }
     
     try:
         # 优先使用缓存的 record_id，避免查询所有记录
@@ -565,13 +599,28 @@ def get_form_record_data(form_id: str, db: Session = Depends(get_db)):
                     converted_data[field_id] = None
             elif input_type == "attachment":
                 if isinstance(value, list) and len(value) > 0:
-                    file_tokens = []
+                    attachments = []
                     for item in value:
                         if isinstance(item, dict):
-                            token = item.get("file_token") or item.get("token")
-                            if token:
-                                file_tokens.append(token)
-                    converted_data[field_id] = file_tokens if file_tokens else None
+                            file_token = item.get("file_token") or item.get("token")
+                            # 尝试获取临时下载链接
+                            temp_url = None
+                            if file_token:
+                                try:
+                                    # 获取临时下载链接（有效期通常为1小时）
+                                    temp_url = get_temp_download_url(file_token, base_token)
+                                except Exception as e:
+                                    log_to_file(f"[get_form_record_data] 获取临时链接失败: {e}")
+                            
+                            # 返回完整附件信息供前端展示
+                            attachments.append({
+                                "file_token": file_token,
+                                "name": item.get("name", "unknown"),
+                                "url": item.get("url", ""),
+                                "temp_url": temp_url,  # 临时下载链接
+                                "type": item.get("type", "")
+                            })
+                    converted_data[field_id] = attachments if attachments else None
                 else:
                     converted_data[field_id] = None
             else:
@@ -591,6 +640,7 @@ def get_form_record_data(form_id: str, db: Session = Depends(get_db)):
 
 @router.post("/{form_id}/submit")
 async def submit_form(
+    request: Request,
     form_id: str,
     signature: Optional[UploadFile] = File(None),
     form_data: str = Form(default="{}"),
@@ -636,8 +686,77 @@ async def submit_form(
         
         # 构建记录字段
         fields = {}
+
+        # ===== 服务端兜底：必填校验（避免前端绕过） =====
+        # 注意：附件/签名的必填校验在解析 multipart（uploaded_attachment_tokens）之后补齐
+        try:
+            required_errors = []
+            for fc in field_configs or []:
+                if not fc.get('required'):
+                    continue
+                fid = fc.get('field_id')
+                itype = fc.get('input_type')
+                label = fc.get('label') or fc.get('field_name') or fid
+
+                if itype == 'attachment':
+                    continue
+
+                v = extra_data.get(fid)
+                if itype == 'multiselect':
+                    if not v or (isinstance(v, list) and len(v) == 0):
+                        required_errors.append(label)
+                elif itype == 'checkbox':
+                    # checkbox required 通常表示必须勾选；这里保持宽松（不强制），避免历史表单被卡死
+                    pass
+                else:
+                    if v is None or (isinstance(v, str) and not v.strip()):
+                        required_errors.append(label)
+
+            if required_errors:
+                raise HTTPException(status_code=422, detail=f"必填项未填写: {', '.join(required_errors)}")
+        except HTTPException:
+            raise
+        except Exception as e:
+            log_to_file(f"[Form Submit] Required validation skipped due to error: {e}")
         
-        # 处理签名字段（如果有上传签名）
+        # 处理附件字段（支持多字段）
+        uploaded_attachment_tokens = {}  # field_id -> file_token
+
+        # 1) 新版：attachment_{fieldId}
+        try:
+            form_obj = await request.form()
+            for k, v in form_obj.multi_items():
+                if not isinstance(k, str):
+                    continue
+                if not k.startswith('attachment_'):
+                    continue
+                if not isinstance(v, UploadFile):
+                    continue
+
+                field_id = k[len('attachment_'):]
+                if not field_id:
+                    continue
+
+                file_bytes = await v.read()
+                if not file_bytes:
+                    continue
+
+                upload_name = v.filename or f"attachment_{field_id}.png"
+                try:
+                    token = upload_to_bitable(form.app_token, file_bytes, upload_name, base_token)
+                    uploaded_attachment_tokens[field_id] = token
+                except PermissionError as perm_err:
+                    log_to_file(f"[Form Submit] Upload permission error: {perm_err}")
+                    raise HTTPException(status_code=403, detail="上传文件权限不足，请检查授权码权限")
+                except Exception as upload_err:
+                    error_str = str(upload_err)
+                    log_to_file(f"[Form Submit] Upload failed: {error_str}")
+                    raise HTTPException(status_code=500, detail=f"上传文件失败: {error_str}")
+        except Exception as e:
+            # 如果解析 multipart 失败，不影响旧逻辑
+            log_to_file(f"[Form Submit] Parse multipart failed: {e}")
+
+        # 2) 旧版兼容：signature 单文件，写入第一个附件字段
         file_token = None
         if signature and signature.filename:
             signature_data = await signature.read()
@@ -647,12 +766,12 @@ async def submit_form(
                     file_token = upload_to_bitable(form.app_token, signature_data, file_name, base_token)
                 except PermissionError as perm_err:
                     log_to_file(f"[Form Submit] Upload permission error: {perm_err}")
-                    raise HTTPException(status_code=403, detail=f"上传文件权限不足，请检查授权码权限")
+                    raise HTTPException(status_code=403, detail="上传文件权限不足，请检查授权码权限")
                 except Exception as upload_err:
                     error_str = str(upload_err)
                     log_to_file(f"[Form Submit] Upload failed: {error_str}")
                     raise HTTPException(status_code=500, detail=f"上传文件失败: {error_str}")
-                
+
                 # 查找附件类型字段
                 attachment_field_id = form.signature_field_id
                 if not attachment_field_id:
@@ -660,11 +779,37 @@ async def submit_form(
                         if fc.get("input_type") == "attachment" or fc.get("type") == 17:
                             attachment_field_id = fc.get("field_id")
                             break
-                
+
                 if attachment_field_id and file_token:
-                    # 使用字段名称而非字段ID
-                    field_name = field_id_to_name.get(attachment_field_id) or attachment_field_id
-                    fields[field_name] = [{"file_token": file_token}]
+                    uploaded_attachment_tokens[attachment_field_id] = file_token
+
+        # ===== 服务端兜底：附件必填校验 =====
+        # 若某附件字段被设置 required，则必须在本次请求中提交对应 attachment_{fieldId}
+        # 或旧版 signature 映射到该字段。
+        try:
+            missing_attach = []
+            for fc in field_configs or []:
+                if not fc.get('required'):
+                    continue
+                if fc.get('input_type') != 'attachment' and fc.get('type') != 17:
+                    continue
+                fid = fc.get('field_id')
+                label = fc.get('label') or fc.get('field_name') or fid
+                if fid not in uploaded_attachment_tokens:
+                    missing_attach.append(label)
+            if missing_attach:
+                raise HTTPException(status_code=422, detail=f"必填附件未提交: {', '.join(missing_attach)}")
+        except HTTPException:
+            raise
+        except Exception as e:
+            log_to_file(f"[Form Submit] Attachment required validation skipped due to error: {e}")
+
+        # 写入所有已上传的附件
+        for attachment_field_id, token in uploaded_attachment_tokens.items():
+            if not token:
+                continue
+            field_name = field_id_to_name.get(attachment_field_id) or attachment_field_id
+            fields[field_name] = [{"file_token": token}]
         
         # 处理其他字段数据（根据类型转换格式）
         for key, value in extra_data.items():
@@ -909,34 +1054,113 @@ async def submit_form(
 
 
 @router.get("/list")
-def list_forms(created_by: Optional[str] = None, db: Session = Depends(get_db)):
-    """获取表单列表"""
-    query = db.query(SignForm).filter(SignForm.is_active.is_(True))
-    
-    if created_by:
-        query = query.filter(SignForm.created_by == created_by)
-    
+def list_forms(
+    db: Session = Depends(get_db),
+    user_info: dict = Depends(get_current_user_info),
+):
+    """获取当前登录用户的表单列表（需要JWT认证）"""
+    query = db.query(SignForm).filter(
+        SignForm.is_active.is_(True),
+        SignForm.created_by == str(user_info['user_id']),
+    )
+
     forms = query.order_by(SignForm.created_at.desc()).all()
-    
+
     return {
-        "forms": [{
-            "form_id": f.form_id,
-            "name": f.name,
-            "submit_count": f.submit_count,
-            "created_at": int(f.created_at.timestamp())
-        } for f in forms]
+        "forms": [
+            {
+                "form_id": f.form_id,
+                "name": f.name,
+                "submit_count": f.submit_count,
+                "created_at": int(f.created_at.timestamp()),
+            }
+            for f in forms
+        ]
     }
 
 
 @router.delete("/{form_id}")
-def delete_form(form_id: str, db: Session = Depends(get_db)):
-    """删除表单（软删除）"""
-    form = db.query(SignForm).filter(SignForm.form_id == form_id).first()
-    
+def delete_form(
+    form_id: str,
+    db: Session = Depends(get_db),
+    user_info: dict = Depends(get_current_user_info),
+):
+    """删除表单（软删除，需要JWT认证且只能删自己的）"""
+    form = db.query(SignForm).filter(
+        SignForm.form_id == form_id,
+        SignForm.created_by == str(user_info['user_id']),
+    ).first()
+
     if not form:
         raise HTTPException(status_code=404, detail="表单不存在")
-    
+
     form.is_active = False
     db.commit()
-    
+
     return {"success": True}
+
+
+@router.get("/proxy/media/{form_id}/{file_token}")
+async def proxy_media(form_id: str, file_token: str, db: Session = Depends(get_db)):
+    """代理获取飞书媒体文件（使用表单创建者的授权码）"""
+    try:
+        # 1. 查找表单以获取授权码
+        form = db.query(SignForm).filter(SignForm.form_id == form_id).first()
+        if not form:
+            log_to_file(f"[Proxy Media] Form not found: {form_id}")
+            raise HTTPException(status_code=404, detail="表单不存在")
+            
+        base_token = form.creator_base_token
+        log_to_file(f"[Proxy Media] Form {form_id}, base_token exists: {bool(base_token)}, length: {len(base_token) if base_token else 0}")
+        
+        # 尝试多种认证方式
+        headers_list = []
+        
+        # 方式1: 使用创建者的 base_token
+        if base_token:
+            log_to_file(f"[Proxy Media] Trying creator base_token: {base_token[:20]}...")
+            headers_list.append(("creator_base_token", auth_service.get_base_authorization_header(base_token)))
+        
+        # 方式2: 尝试使用服务端 tenant_access_token（如果配置了）
+        try:
+            service_headers = auth_service.get_auth_header()
+            log_to_file(f"[Proxy Media] Trying service tenant_access_token")
+            headers_list.append(("service_token", service_headers))
+        except Exception as e:
+            log_to_file(f"[Proxy Media] Service token not available: {e}")
+        
+        if not headers_list:
+            raise HTTPException(status_code=403, detail="未配置授权码")
+
+        url = f"https://open.feishu.cn/open-apis/drive/v1/medias/{file_token}/download"
+        log_to_file(f"[Proxy Media] Requesting: {url}")
+        
+        # 尝试所有认证方式
+        last_error = None
+        for auth_type, headers in headers_list:
+            try:
+                log_to_file(f"[Proxy Media] Trying {auth_type}...")
+                r = requests.get(url, headers=headers, stream=True, timeout=10)
+                
+                if r.status_code == 200:
+                    log_to_file(f"[Proxy Media] Success with {auth_type}: {file_token}")
+                    return StreamingResponse(
+                        r.iter_content(chunk_size=8192), 
+                        media_type=r.headers.get("Content-Type", "application/octet-stream")
+                    )
+                else:
+                    log_to_file(f"[Proxy Media] {auth_type} failed: {r.status_code} {r.text[:200]}")
+                    last_error = f"{auth_type}: {r.status_code}"
+            except Exception as e:
+                log_to_file(f"[Proxy Media] {auth_type} exception: {e}")
+                last_error = f"{auth_type}: {str(e)}"
+        
+        # 所有方式都失败
+        log_to_file(f"[Proxy Media] All auth methods failed. Last error: {last_error}")
+        raise HTTPException(status_code=404, detail=f"文件加载失败: {last_error}")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_to_file(f"[Proxy Media] Error: {e}")
+        raise HTTPException(status_code=500, detail="服务器内部错误")

@@ -10,14 +10,10 @@ const props = defineProps({
   modelValue: {
     type: Boolean,
     default: false
-  },
-  userInfo: {
-    type: Object,
-    default: () => ({ openId: '', tenantKey: '' })
   }
 })
 
-const emit = defineEmits(['update:modelValue', 'close', 'success'])
+const emit = defineEmits(['update:modelValue', 'close', 'success', 'toast'])
 
 const inviteCode = ref('')
 
@@ -38,11 +34,7 @@ async function handleRedeem() {
     return
   }
   try {
-    const result = await redeemInvite(
-      inviteCode.value.trim(), 
-      props.userInfo.openId, 
-      props.userInfo.tenantKey
-    )
+    const result = await redeemInvite(inviteCode.value.trim())
     if (result.success) {
       emit('toast', { message: `邀请码兑换成功！${result.benefit_days}天内可免费使用`, type: 'success' })
       emit('update:modelValue', false)

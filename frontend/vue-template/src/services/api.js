@@ -1,4 +1,25 @@
 import axios from 'axios'
+import { validateUploadParams, validateQuotaParams, getMissingFieldsMessage } from '@/utils/validation'
+
+// ==================== 用户初始化 API ====================
+
+/**
+ * 初始化用户 - 首次访问时调用
+ * @param {string} feishuUserId - 飞书用户ID
+ * @param {string} tenantKey - 租户Key
+ * @param {string} fingerprint - 设备指纹
+ * @returns {Promise<Object>} { user_id, feishu_user_id, tenant_key, token, token_type, expires_in }
+ */
+export async function initUser(feishuUserId, tenantKey, fingerprint) {
+  const { data } = await api.post('/api/user/init', {
+    feishu_user_id: feishuUserId,
+    tenant_key: tenantKey,
+    fingerprint: fingerprint
+  })
+  return data
+}
+
+// ====================
 
 // baseURL 规则：
 // - 显式配置了 VITE_API_BASE：始终优先使用（适合多环境部署）
@@ -26,41 +47,165 @@ const api = axios.create({
 const DEBUG = import.meta.env.DEV
 if (DEBUG) console.log('[API] baseURL =', api.defaults.baseURL)
 
-// 添加请求拦截器
+// 添加请求拦截器 - 自动添加 JWT Token
 api.interceptors.request.use(
   (config) => {
     if (DEBUG) console.log('[API]', config.method?.toUpperCase(), config.url)
+    
+    // 从 localStorage 获取 JWT Token
+    const token = localStorage.getItem('feishu_plugin_jwt_token')
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`
+    }
+    
     return config
   },
   (error) => Promise.reject(error)
 )
 
-// 添加响应拦截器
+// Token 刷新状态管理
+let isRefreshing = false
+let failedQueue = []
+
+const processQueue = (error, token = null) => {
+  failedQueue.forEach(prom => {
+    if (error) {
+      prom.reject(error)
+    } else {
+      prom.resolve(token)
+    }
+  })
+  failedQueue = []
+}
+
+// 添加响应拦截器 - 处理 401 未授权并自动刷新 Token
 api.interceptors.response.use(
   (response) => response,
-  (error) => {
-    if (DEBUG) console.error('[API Error]', error.config?.url, error.response?.status)
+  async (error) => {
+    const originalRequest = error.config
+    
+    if (DEBUG) console.error('[API Error]', originalRequest?.url, error.response?.status)
+    
+    // 如果返回 401 且未重试过，尝试刷新 Token
+    if (error.response?.status === 401 && !originalRequest._retry) {
+      if (isRefreshing) {
+        // 如果正在刷新，将请求加入队列
+        return new Promise((resolve, reject) => {
+          failedQueue.push({ resolve, reject })
+        }).then(token => {
+          originalRequest.headers.Authorization = `Bearer ${token}`
+          return api(originalRequest)
+        }).catch(err => {
+          return Promise.reject(err)
+        })
+      }
+      
+      originalRequest._retry = true
+      isRefreshing = true
+      
+      try {
+        if (DEBUG) console.log('[API] Token expired, attempting to refresh...')
+        
+        // 重新初始化用户
+        const { bitable } = await import('@lark-base-open/js-sdk')
+        const info = await bitable.bridge.getUserInfo()
+        
+        // 生成设备指纹
+        const generateFingerprint = () => {
+          const nav = navigator
+          const screen = window.screen
+          const components = [
+            nav.userAgent,
+            nav.language,
+            screen.colorDepth,
+            screen.width + 'x' + screen.height,
+            new Date().getTimezoneOffset(),
+            !!window.sessionStorage,
+            !!window.localStorage
+          ]
+          return btoa(components.join('|'))
+        }
+        
+        const fingerprint = generateFingerprint()
+        
+        // 调用初始化接口获取新 Token
+        const initResult = await initUser(
+          info.userId || info.openId,
+          info.tenantKey,
+          fingerprint
+        )
+        
+        // 保存新 Token
+        localStorage.setItem('feishu_plugin_jwt_token', initResult.token)
+        const expiryTime = Date.now() + (initResult.expires_in * 1000)
+        localStorage.setItem('feishu_plugin_jwt_expiry', expiryTime.toString())
+        
+        if (DEBUG) console.log('[API] Token refreshed successfully')
+        
+        // 更新请求头
+        api.defaults.headers.Authorization = `Bearer ${initResult.token}`
+        originalRequest.headers.Authorization = `Bearer ${initResult.token}`
+        
+        // 处理队列中的请求
+        processQueue(null, initResult.token)
+        
+        // 重试原请求
+        return api(originalRequest)
+      } catch (refreshError) {
+        if (DEBUG) console.error('[API] Token refresh failed:', refreshError)
+        
+        // 刷新失败，清除 Token
+        processQueue(refreshError, null)
+        localStorage.removeItem('feishu_plugin_jwt_token')
+        localStorage.removeItem('feishu_plugin_jwt_expiry')
+        
+        // 提示用户刷新页面
+        console.warn('[API] Token refresh failed, please reload the page')
+        
+        return Promise.reject(refreshError)
+      } finally {
+        isRefreshing = false
+      }
+    }
+    
     return Promise.reject(error)
   }
 )
 
-export async function uploadSignature({ blob, fileName, folderToken, openId, tenantKey, hasQuota = false }) {
+export async function uploadSignature({ blob, fileName, folderToken, hasQuota = false, appToken = '' }) {
+  // 参数验证
+  const validation = validateUploadParams({ blob, fileName, folderToken, openId: 'jwt', tenantKey: 'jwt' })
+  if (!validation.valid) {
+    const missing = validation.missing.filter(f => f !== 'openId' && f !== 'tenantKey')
+    if (missing.length > 0) {
+      throw new Error(getMissingFieldsMessage(missing))
+    }
+  }
+
   const form = new FormData()
-  form.append('file', blob, fileName || 'signature.png')
-  form.append('file_name', fileName || 'signature.png')
-  if (folderToken) form.append('folder_token', folderToken)
-  if (openId) form.append('open_id', openId)
-  if (tenantKey) form.append('tenant_key', tenantKey)
-  form.append('has_quota', hasQuota ? 1 : 0)  // 飞书官方付费权益标记
+  form.append('file', blob, fileName)
+  form.append('file_name', fileName)
+  form.append('folder_token', folderToken)
+  form.append('has_quota', hasQuota ? 1 : 0)
 
-  // 从 localStorage 获取用户的授权码
-  const baseToken = localStorage.getItem('feishu_base_token') || ''
+  // 从 localStorage 获取指定表格的授权码（必填）
+  let baseToken = ''
+  if (appToken) {
+    // 使用新的多表格存储格式
+    const tokens = JSON.parse(localStorage.getItem('feishu_base_tokens') || '{}')
+    baseToken = tokens[appToken] || ''
+  } else {
+    // 兼容旧版本单一授权码
+    baseToken = localStorage.getItem('feishu_base_token') || ''
+  }
+  
+  if (!baseToken) {
+    throw new Error('未配置授权码，请先在插件中配置您的飞书授权码')
+  }
 
-  // 将用户授权码添加到请求头
-  const config = {}
-  if (baseToken) {
-    config.headers = {
-      'X-Base-Token': baseToken  // 使用自定义头传递授权码
+  const config = {
+    headers: {
+      'X-Base-Token': baseToken
     }
   }
 
@@ -68,24 +213,21 @@ export async function uploadSignature({ blob, fileName, folderToken, openId, ten
   return data.file_token
 }
 
-export async function getQuota(openId, tenantKey) {
-  const { data } = await api.get('/api/quota/status', { params: { open_id: openId, tenant_key: tenantKey } })
+export async function getQuota() {
+  const { data } = await api.get('/api/quota/status')
   return data
 }
 
 // 检查是否可以签名
-export async function checkCanSign(openId, tenantKey) {
-  const { data } = await api.get('/api/quota/check', { params: { open_id: openId, tenant_key: tenantKey } })
-  return data // { can_sign, reason, consume_quota }
+export async function checkCanSign() {
+  const { data } = await api.get('/api/quota/check')
+  return data
 }
 
 // 消耗配额
-export async function consumeQuota(openId, tenantKey, fileToken, fileName, count = 1) {
-  // console.log('[Api] Consuming quota for', openId)
+export async function consumeQuota(fileToken, fileName, count = 1) {
   const { data } = await api.post('/api/quota/consume', null, {
     params: {
-      open_id: openId,
-      tenant_key: tenantKey,
       file_token: fileToken,
       file_name: fileName,
       count: count
@@ -101,8 +243,12 @@ export async function validateInvite(code) {
 }
 
 // 兑换邀请码
-export async function redeemInvite(code, openId, tenantKey) {
-  const { data } = await api.post('/api/invite/redeem', { code, open_id: openId, tenant_key: tenantKey })
+export async function redeemInvite(code) {
+  if (!code) {
+    throw new Error('邀请码不能为空')
+  }
+
+  const { data } = await api.post('/api/invite/redeem', { code })
   return data
 }
 
@@ -120,8 +266,12 @@ export async function getPricingPlans() {
 }
 
 // 创建支付订单
-export async function createOrder(planId, openId, tenantKey) {
-  const { data } = await api.post('/api/payment/create', { plan_id: planId, open_id: openId, tenant_key: tenantKey })
+export async function createOrder(planId) {
+  if (!planId) {
+    throw new Error('套餐ID不能为空')
+  }
+
+  const { data } = await api.post('/api/payment/create', { plan_id: planId })
   return data
 }
 
@@ -135,21 +285,32 @@ export async function getOrderStatus(orderId) {
 export async function createShareForm(formData) {
   // 如果没有传递 base_token，从 localStorage 获取
   if (!formData.base_token) {
-    formData.base_token = localStorage.getItem('feishu_base_token') || ''
+    const appToken = formData.app_token
+    if (appToken) {
+      // 使用新的多表格存储格式
+      const tokens = JSON.parse(localStorage.getItem('feishu_base_tokens') || '{}')
+      formData.base_token = tokens[appToken] || ''
+    } else {
+      // 兼容旧版本单一授权码
+      formData.base_token = localStorage.getItem('feishu_base_token') || ''
+    }
   }
   const { data } = await api.post('/api/form/create', formData)
   return data
 }
 
-// 获取分享表单列表
-export async function getShareFormList(createdBy) {
-  const { data } = await api.get('/api/form/list', { params: { created_by: createdBy } })
+// 获取分享表单列表（使用JWT认证，不需要传递created_by参数）
+export async function getShareFormList() {
+  const { data } = await api.get('/api/form/list')
   return data
 }
 
 // 获取多维表格字段列表
 export async function getTableFields(appToken, tableId) {
-  const baseToken = localStorage.getItem('feishu_base_token') || ''
+  // 使用新的多表格存储格式
+  const tokens = JSON.parse(localStorage.getItem('feishu_base_tokens') || '{}')
+  const baseToken = tokens[appToken] || localStorage.getItem('feishu_base_token') || ''
+  
   const { data } = await api.get('/api/form/table-fields', {
     params: { app_token: appToken, table_id: tableId, base_token: baseToken }
   })
@@ -158,16 +319,21 @@ export async function getTableFields(appToken, tableId) {
 
 // 获取多维表格记录数量
 export async function getRecordCount(appToken, tableId) {
-  const baseToken = localStorage.getItem('feishu_base_token') || ''
+  // 使用新的多表格存储格式
+  const tokens = JSON.parse(localStorage.getItem('feishu_base_tokens') || '{}')
+  const baseToken = tokens[appToken] || localStorage.getItem('feishu_base_token') || ''
+  
   const { data } = await api.get('/api/form/record-count', {
     params: { app_token: appToken, table_id: tableId, base_token: baseToken }
   })
   return data
 }
 
-// 获取表单关联记录的数据
+// 获取表单关联记录的数据（公开接口，不需要认证）
 export async function getFormRecordData(formId) {
-  const { data } = await api.get(`/api/form/${formId}/record-data`)
+  // 使用不带认证的请求
+  const baseURL = import.meta.env.VITE_API_BASE || (import.meta.env.DEV ? 'http://localhost:8000' : window.location.origin)
+  const { data } = await axios.get(`${baseURL}/api/form/${formId}/record-data`)
   return data
 }
 
@@ -185,12 +351,14 @@ export async function clearAllForms(createdBy) {
 // ==================== 支付宝支付 (YunGouOS) ====================
 
 // 创建支付宝支付订单
-export async function createAlipayOrder(planId, openId, tenantKey, payType = 'native') {
+export async function createAlipayOrder(planId, payType = 'native') {
+  if (!planId) {
+    throw new Error('套餐ID不能为空')
+  }
+
   const { data } = await api.post('/api/payment/alipay/create', {
     plan_id: planId,
-    open_id: openId,
-    tenant_key: tenantKey,
-    pay_type: payType  // native（扫码）或 h5
+    pay_type: payType
   })
   return data
 }

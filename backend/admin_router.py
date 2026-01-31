@@ -17,8 +17,10 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
 
-from database import get_db, User, InviteCode, Order, SignatureLog, SignForm, PricingPlan, UserProfile
-from user_db_manager import get_user_session, ensure_user_database
+from database import get_db, InviteCode, Order, SignatureLog, SignForm, PricingPlan, UserProfile
+from user_db_manager import get_user_session, ensure_user_database, get_master_engine
+from user_router import AppUserIdentity
+from sqlalchemy import text, cast, Date
 
 
 # 密码文件路径
@@ -258,9 +260,9 @@ def get_dashboard(db: Session = Depends(get_db), _: bool = Depends(verify_admin)
     """获取仪表盘统计数据"""
     today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # 用户统计
-    total_users = db.query(User).count()
-    new_users_today = db.query(User).filter(User.created_at >= today).count()
+    # 用户统计 - 使用新的 AppUserIdentity 表
+    total_users = db.query(AppUserIdentity).count()
+    new_users_today = db.query(AppUserIdentity).filter(AppUserIdentity.created_at >= today).count()
 
     # 签名统计
     total_signatures = db.query(SignatureLog).count()
@@ -324,9 +326,9 @@ def get_dashboard_trends(
 
     user_counts = {}
     user_results = (
-        db.query(cast(User.created_at, Date).label("date"), func.count(User.id).label("count"))
-        .filter(User.created_at >= datetime.combine(start_date, datetime.min.time()))
-        .group_by(cast(User.created_at, Date))
+        db.query(cast(AppUserIdentity.created_at, Date).label("date"), func.count(AppUserIdentity.id).label("count"))
+        .filter(AppUserIdentity.created_at >= datetime.combine(start_date, datetime.min.time()))
+        .group_by(cast(AppUserIdentity.created_at, Date))
         .all()
     )
 
@@ -365,38 +367,68 @@ def list_users(
     db: Session = Depends(get_db),
     _: bool = Depends(verify_admin),
 ):
-    """获取用户列表（分页）"""
-    query = db.query(User)
+    """获取用户列表（分页）- 从新的AppUserIdentity表和用户独立数据库查询"""
+    query = db.query(AppUserIdentity)
 
     if search:
-        query = query.filter(User.open_id.contains(search))
+        query = query.filter(AppUserIdentity.feishu_user_id.contains(search))
 
     total = query.count()
     users = (
-        query.order_by(desc(User.created_at))
+        query.order_by(desc(AppUserIdentity.created_at))
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()
     )
 
+    # 为每个用户查询配额信息（从用户独立数据库）
+    items = []
+    for u in users:
+        user_key = f"{u.feishu_user_id}::{u.tenant_key}"
+        
+        # 默认值
+        remaining_quota = 0
+        total_used = 0
+        current_plan_id = None
+        total_paid = 0
+        invite_code_used = None
+        invite_expire_at = None
+        
+        try:
+            ensure_user_database(user_key)
+            user_db = get_user_session(user_key)
+            try:
+                profile = user_db.query(UserProfile).first()
+                if profile:
+                    remaining_quota = profile.remaining_quota or 0
+                    total_used = profile.total_used or 0
+                    current_plan_id = profile.current_plan_id
+                    total_paid = profile.total_paid or 0
+                    invite_code_used = profile.invite_code_used
+                    invite_expire_at = profile.invite_expire_at
+            finally:
+                user_db.close()
+        except Exception as e:
+            print(f"Failed to get profile for {user_key}: {e}")
+        
+        items.append({
+            "id": u.id,
+            "open_id": u.feishu_user_id,
+            "tenant_key": u.tenant_key,
+            "remaining_quota": remaining_quota,
+            "total_used": total_used,
+            "current_plan_id": current_plan_id,
+            "total_paid": total_paid,
+            "invite_code_used": invite_code_used,
+            "invite_expire_at": invite_expire_at.isoformat() if invite_expire_at else None,
+            "created_at": u.created_at.isoformat(),
+        })
+    
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
-        "items": [
-            {
-                "id": u.id,
-                "open_id": u.open_id,
-                "tenant_key": u.tenant_key,
-                "remaining_quota": u.remaining_quota,
-                "total_used": u.total_used,
-                "invite_code_used": u.invite_code_used,
-                "invite_expire_at": u.invite_expire_at.isoformat() if u.invite_expire_at else None,
-                "total_paid": u.total_paid,
-                "created_at": u.created_at.isoformat(),
-            }
-            for u in users
-        ],
+        "items": items,
     }
 
 
@@ -407,15 +439,26 @@ def update_user_quota(
     db: Session = Depends(get_db),
     _: bool = Depends(verify_admin),
 ):
-    """调整用户配额"""
-    user = db.query(User).filter(User.id == user_id).first()
+    """调整用户配额 - 更新用户独立数据库中的配额"""
+    user = db.query(AppUserIdentity).filter(AppUserIdentity.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
 
-    user.remaining_quota = req.remaining_quota
-    db.commit()
-
-    return {"success": True, "remaining_quota": user.remaining_quota}
+    user_key = f"{user.feishu_user_id}::{user.tenant_key}"
+    ensure_user_database(user_key)
+    user_db = get_user_session(user_key)
+    
+    try:
+        profile = user_db.query(UserProfile).first()
+        if not profile:
+            raise HTTPException(status_code=404, detail="用户配置不存在")
+        
+        profile.remaining_quota = req.remaining_quota
+        user_db.commit()
+        
+        return {"success": True, "remaining_quota": profile.remaining_quota}
+    finally:
+        user_db.close()
 
 
 @router.delete("/users/{user_id}", summary="删除用户")
@@ -425,12 +468,16 @@ def delete_user(
     _: bool = Depends(verify_admin),
 ):
     """删除用户及其关联记录"""
-    user = db.query(User).filter(User.id == user_id).first()
+    user = db.query(AppUserIdentity).filter(AppUserIdentity.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
-
+    
+    # 删除用户元信息
     db.delete(user)
     db.commit()
+    
+    # 注意：用户独立数据库不会被自动删除，需要手动清理
+    return {"success": True}
 
 @router.post("/users/{user_id}/reset", summary="初始化/重置用户数据")
 def reset_user(
@@ -439,53 +486,35 @@ def reset_user(
     _: bool = Depends(verify_admin),
 ):
     """重置用户数据（包括配额、邀请码、已用次数等）"""
-    user = db.query(User).filter(User.id == user_id).first()
+    user = db.query(AppUserIdentity).filter(AppUserIdentity.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
 
-    # 1. 处理旧的邀请码计数（如果需要）
-    if user.invite_code_used:
-        old_invite = db.query(InviteCode).filter(InviteCode.code == user.invite_code_used).first()
-        if old_invite and old_invite.used_count > 0:
-            old_invite.used_count -= 1
-    
-    # 2. 重置用户库状态
-    try:
-        ensure_user_database(user.user_key)
-        user_db = get_user_session(user.user_key)
-        
-        if "::" in user.user_key:
-            open_id_val, tenant_key_val = user.user_key.split("::")
-            user_profile = user_db.query(UserProfile).filter(
-                UserProfile.open_id == open_id_val,
-                UserProfile.tenant_key == tenant_key_val
-            ).first()
-            
-            if user_profile:
-                user_profile.remaining_quota = 20  # 恢复默认 20 次
-                user_profile.total_used = 0
-                user_profile.invite_code_used = None
-                user_profile.invite_expire_at = None
-                user_profile.current_plan_id = None  # 清除套餐
-                user_profile.plan_expires_at = None
-                user_profile.plan_quota_reset_at = None
-                user_profile.is_unlimited = False
-                user_db.commit()
-        user_db.close()
-    except Exception as e:
-        print(f"Failed to reset user profile for {user.user_key}: {e}")
-        # 这里不阻断，继续重置共享库
+    user_key = f"{user.feishu_user_id}::{user.tenant_key}"
 
-    # 3. 重置共享库状态
-    user.remaining_quota = 20
-    user.total_used = 0
-    user.invite_code_used = None
-    user.invite_expire_at = None
-    user.total_paid = 0
-    
-    db.commit()
-    
-    return {"success": True, "message": "用户数据已初始化"}
+    # 重置用户独立数据库状态
+    try:
+        ensure_user_database(user_key)
+        user_db = get_user_session(user_key)
+        
+        try:
+            profile = user_db.query(UserProfile).first()
+            if profile:
+                profile.remaining_quota = 20  # 恢复默认 20 次
+                profile.total_used = 0
+                profile.invite_code_used = None
+                profile.invite_expire_at = None
+                profile.current_plan_id = None  # 清除套餐
+                profile.plan_expires_at = None
+                profile.plan_quota_reset_at = None
+                profile.is_unlimited = False
+                user_db.commit()
+        finally:
+            user_db.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"重置失败: {str(e)}")
+
+    return {"success": True, "message": "用户数据已重置"}
 
 
 @router.delete("/users/{user_id}/invite", summary="清理用户邀请码记录")
@@ -495,35 +524,49 @@ def clear_user_invite(
     _: bool = Depends(verify_admin),
 ):
     """清理用户的邀请码使用记录"""
-    user = db.query(User).filter(User.id == user_id).first()
+    user = db.query(AppUserIdentity).filter(AppUserIdentity.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
 
-    if not user.invite_code_used:
-        return {"success": True, "message": "用户未使用过邀请码", "invite_code": None}
-
-    invite_code_str = user.invite_code_used
-
-    user.invite_code_used = None
-    user.invite_expire_at = None
-
-    invite = db.query(InviteCode).filter(InviteCode.code == invite_code_str).first()
-    if invite and invite.used_count > 0:
-        invite.used_count -= 1
-
-    db.commit()
-
-    return {
-        "success": True,
-        "message": "邀请码记录已清理",
-        "invite_code": invite_code_str,
-        "used_count_decreased": invite.used_count if invite else None,
-    }
+    user_key = f"{user.feishu_user_id}::{user.tenant_key}"
+    
+    try:
+        ensure_user_database(user_key)
+        user_db = get_user_session(user_key)
+        
+        try:
+            profile = user_db.query(UserProfile).first()
+            if not profile or not profile.invite_code_used:
+                return {"success": True, "message": "用户未使用过邀请码", "invite_code": None}
+            
+            invite_code_str = profile.invite_code_used
+            
+            # 清除用户的邀请码记录
+            profile.invite_code_used = None
+            profile.invite_expire_at = None
+            user_db.commit()
+            
+            # 更新邀请码的使用计数（共享库）
+            invite = db.query(InviteCode).filter(InviteCode.code == invite_code_str).first()
+            if invite and invite.used_count > 0:
+                invite.used_count -= 1
+                db.commit()
+            
+            return {
+                "success": True,
+                "message": "邀请码记录已清理",
+                "invite_code": invite_code_str,
+                "used_count_decreased": invite.used_count if invite else None,
+            }
+        finally:
+            user_db.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"清理失败: {str(e)}")
 
 
 @router.get("/users/export", summary="导出用户 CSV")
 def export_users(db: Session = Depends(get_db), _: bool = Depends(verify_admin)):
-    users = db.query(User).all()
+    users = db.query(AppUserIdentity).all()
 
     try:
         import openpyxl
@@ -535,20 +578,39 @@ def export_users(db: Session = Depends(get_db), _: bool = Depends(verify_admin))
     ws = wb.active
     ws.title = "用户列表"
 
-    headers = ["ID", "OpenID", "租户Key", "免费次数", "已使用", "邀请码", "VIP到期时间", "累计付费", "注册时间"]
+    headers = ["ID", "OpenID", "租户Key", "剩余配额", "已使用", "当前套餐", "注册时间"]
     ws.append(headers)
 
     for u in users:
+        user_key = f"{u.feishu_user_id}::{u.tenant_key}"
+        
+        # 从用户独立数据库查询配额信息
+        remaining_quota = 0
+        total_used = 0
+        current_plan_id = "-"
+        
+        try:
+            ensure_user_database(user_key)
+            user_db = get_user_session(user_key)
+            try:
+                profile = user_db.query(UserProfile).first()
+                if profile:
+                    remaining_quota = profile.remaining_quota or 0
+                    total_used = profile.total_used or 0
+                    current_plan_id = profile.current_plan_id or "-"
+            finally:
+                user_db.close()
+        except Exception as e:
+            print(f"Failed to get profile for {user_key}: {e}")
+        
         ws.append(
             [
                 u.id,
-                u.open_id,
+                u.feishu_user_id,
                 u.tenant_key,
-                u.remaining_quota,
-                u.total_used,
-                u.invite_code_used or "-",
-                u.invite_expire_at.isoformat() if u.invite_expire_at else "无",
-                u.total_paid / 100.0,
+                remaining_quota,
+                total_used,
+                current_plan_id,
                 u.created_at.isoformat(),
             ]
         )
@@ -792,34 +854,30 @@ def update_invite_status(
     revoked_count = 0
 
     if not is_active and revoke_benefits:
-        affected_users = db.query(User).filter(User.invite_code_used == invite.code).all()
+        # 查询所有使用了该邀请码的用户（从新的 AppUserIdentity 表）
+        affected_users = db.query(AppUserIdentity).all()
+        
         for user in affected_users:
-            # 1. 更新共享库 legacy 状态（保留原有逻辑）
-            if user.invite_expire_at:
-                user.invite_expire_at = None
-                revoked_count += 1
+            user_key = f"{user.feishu_user_id}::{user.tenant_key}"
             
-            # 2. 更新独立用户库状态
+            # 更新用户独立数据库中的邀请码状态
             try:
-                ensure_user_database(user.user_key)
-                user_db = get_user_session(user.user_key)
-                # 分解 open_id 和 tenant_key
-                # user_key format: "open_id::tenant_key"
-                if "::" in user.user_key:
-                    open_id_val, tenant_key_val = user.user_key.split("::")
-                    user_profile = user_db.query(UserProfile).filter(
-                        UserProfile.open_id == open_id_val,
-                        UserProfile.tenant_key == tenant_key_val
-                    ).first()
+                ensure_user_database(user_key)
+                user_db = get_user_session(user_key)
+                
+                try:
+                    profile = user_db.query(UserProfile).first()
                     
-                    if user_profile and user_profile.invite_code_used == invite.code:
-                        user_profile.invite_expire_at = None
-                        # 如果需要连 invite_code_used 也清除，可以解开下行注释
-                        # user_profile.invite_code_used = None 
+                    if profile and profile.invite_code_used == invite.code:
+                        profile.invite_expire_at = None
+                        # 可选：同时清除邀请码记录
+                        # profile.invite_code_used = None 
                         user_db.commit()
-                user_db.close()
+                        revoked_count += 1
+                finally:
+                    user_db.close()
             except Exception as e:
-                print(f"Failed to revoke benefit for user {user.user_key}: {e}")
+                print(f"Failed to revoke benefit for user {user_key}: {e}")
 
     db.commit()
 

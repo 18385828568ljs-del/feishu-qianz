@@ -7,6 +7,8 @@ import hashlib
 import logging
 from typing import Optional, Dict
 from functools import lru_cache
+from collections import OrderedDict
+from threading import Lock
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
@@ -23,9 +25,11 @@ MYSQL_USER = os.getenv("MYSQL_USER", "root")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
 MASTER_DB_NAME = "feishu_master"
 
-# 缓存用户数据库引擎，避免重复创建
-_user_engines: Dict[str, Engine] = {}
+# 使用 LRU 缓存限制连接池数量
+MAX_CACHED_ENGINES = 100
+_user_engines: OrderedDict[str, Engine] = OrderedDict()
 _user_session_factories: Dict[str, sessionmaker] = {}
+_engines_lock = Lock()
 
 
 def get_user_db_name(user_key: str) -> str:
@@ -50,7 +54,7 @@ def get_master_engine() -> Engine:
 
 def get_user_engine(user_key: str) -> Engine:
     """
-    获取用户数据库引擎（带缓存）
+    获取用户数据库引擎（带 LRU 缓存）
     
     Args:
         user_key: 用户唯一标识
@@ -58,14 +62,35 @@ def get_user_engine(user_key: str) -> Engine:
     Returns:
         SQLAlchemy Engine 实例
     """
-    if user_key in _user_engines:
-        return _user_engines[user_key]
-    
-    db_name = get_user_db_name(user_key)
-    url = f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{db_name}?charset=utf8mb4"
-    engine = create_engine(url, pool_pre_ping=True, echo=False, pool_size=5, max_overflow=10)
-    _user_engines[user_key] = engine
-    return engine
+    with _engines_lock:
+        # 如果已存在，移到末尾（最近使用）
+        if user_key in _user_engines:
+            _user_engines.move_to_end(user_key)
+            return _user_engines[user_key]
+        
+        # 如果缓存已满，移除最旧的
+        if len(_user_engines) >= MAX_CACHED_ENGINES:
+            oldest_key, oldest_engine = _user_engines.popitem(last=False)
+            try:
+                oldest_engine.dispose()
+                logger.info(f"Disposed engine for {oldest_key} (cache full)")
+            except Exception as e:
+                logger.warning(f"Failed to dispose engine for {oldest_key}: {e}")
+        
+        # 创建新引擎
+        db_name = get_user_db_name(user_key)
+        url = f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{db_name}?charset=utf8mb4"
+        engine = create_engine(
+            url, 
+            pool_pre_ping=True, 
+            echo=False, 
+            pool_size=5,  # 每个引擎5个连接
+            max_overflow=10,
+            pool_recycle=3600  # 1小时回收连接
+        )
+        _user_engines[user_key] = engine
+        logger.info(f"Created new engine for {user_key} (cache size: {len(_user_engines)})")
+        return engine
 
 
 def get_user_session(user_key: str) -> Session:

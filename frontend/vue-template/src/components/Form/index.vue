@@ -7,7 +7,7 @@
 import { bitable } from '@lark-base-open/js-sdk'
 import { ref, onMounted, computed, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { uploadSignature, consumeQuota } from '@/services/api'
+import { uploadSignature, consumeQuota, initUser } from '@/services/api'
 
 // 导入 Composables
 import { useToast } from '@/composables/useToast'
@@ -29,7 +29,7 @@ import BatchSelectDialog from './BatchSelectDialog.vue'
 const { toastMessage, toastType, showToast } = useToast()
 const { authorized, startAuth } = useAuth()
 const { quota, canSign, loadQuota } = useQuota()
-const { hasBaseToken } = useBaseToken()
+const { hasBaseToken, setCurrentAppToken } = useBaseToken()
 
 // 表格状态
 const state = ref({
@@ -40,10 +40,7 @@ const state = ref({
 })
 
 // 用户信息
-const userInfo = ref({
-  openId: '',
-  tenantKey: '',
-})
+const userOpenId = ref('')
 
 // 当前 app_token
 const currentAppToken = ref('')
@@ -69,7 +66,31 @@ let offSelectionChange = null
 
 // 计算属性
 const hasSelection = computed(() => !!state.value.recordId)
-const userKey = computed(() => `${userInfo.value.openId}::${userInfo.value.tenantKey}`)
+
+// 生成设备指纹
+function generateFingerprint() {
+  const components = [
+    navigator.userAgent,
+    navigator.language,
+    screen.width + 'x' + screen.height,
+    screen.colorDepth,
+    new Date().getTimezoneOffset(),
+    !!window.sessionStorage,
+    !!window.localStorage
+  ]
+  
+  const fingerprint = components.join('|')
+  
+  // 简单的哈希函数
+  let hash = 0
+  for (let i = 0; i < fingerprint.length; i++) {
+    const char = fingerprint.charCodeAt(i)
+    hash = ((hash << 5) - hash) + char
+    hash = hash & hash
+  }
+  
+  return 'fp_' + Math.abs(hash).toString(36)
+}
 
 // 初始化
 async function init() {
@@ -79,6 +100,11 @@ async function init() {
     state.value.tableId = selection.tableId || ''
     state.value.recordId = selection.recordId || ''
     currentAppToken.value = selection.baseId || ''
+    
+    // 设置当前表格的 app_token，用于获取对应的授权码
+    if (currentAppToken.value) {
+      setCurrentAppToken(currentAppToken.value)
+    }
 
     // 如果初始化时就有选中的字段，检查是否是附件字段
     if (selection.fieldId && selection.tableId) {
@@ -140,20 +166,141 @@ async function init() {
       await refreshFieldInfo()
     }
     
-    // 获取用户信息
+    // 获取用户信息（从飞书SDK）
+    let openId = null
+    let tenantKey = null
+    
     try {
-      const bridgeInfo = await bitable.bridge.getUserInfo?.() || {}
-      userInfo.value.openId = bridgeInfo.openId || 'anonymous'
-      userInfo.value.tenantKey = bridgeInfo.tenantKey || 'anonymous'
-    } catch {
-      userInfo.value.openId = 'anonymous'
-      userInfo.value.tenantKey = 'anonymous'
+      // 检查是否在飞书环境中
+      if (!bitable || !bitable.bridge || !bitable.bridge.getUserInfo) {
+        console.warn('[Init] Not in Feishu environment, using development mode')
+        
+        // 开发模式：使用模拟数据
+        if (import.meta.env.DEV) {
+          openId = 'dev_user_' + Math.random().toString(36).substring(2, 10)
+          tenantKey = 'dev_tenant_' + Math.random().toString(36).substring(2, 10)
+          console.log('[Init] Development mode - using mock user:', { openId, tenantKey })
+        } else {
+          // 生产环境：必须在飞书中打开
+          ElMessageBox.alert(
+            '请在飞书客户端中打开此插件\n\n此插件必须在飞书多维表格中使用，无法在浏览器中直接访问。',
+            '环境错误',
+            {
+              confirmButtonText: '我知道了',
+              type: 'error',
+              showClose: false,
+            }
+          )
+          return
+        }
+      } else {
+        // 正常模式：从飞书SDK获取
+        const info = await bitable.bridge.getUserInfo()
+        console.log('[Init] getUserInfo result:', info)
+        
+        if (info) {
+          openId = info.userId || info.openId
+          tenantKey = info.tenantKey
+        }
+      }
+      
+      // 验证必须字段
+      if (!openId || !tenantKey) {
+        const missingFields = []
+        if (!openId) missingFields.push('用户ID')
+        if (!tenantKey) missingFields.push('租户Key')
+        
+        const errorMsg = `无法获取${missingFields.join('和')}，请确保：\n1. 在飞书客户端中打开此插件\n2. 已登录飞书账号\n3. 拥有该多维表格的访问权限\n\n调试信息：\n- openId: ${openId || '未获取'}\n- tenantKey: ${tenantKey || '未获取'}`
+        
+        ElMessageBox.alert(errorMsg, '身份验证失败', {
+          confirmButtonText: '我知道了',
+          type: 'error',
+          showClose: false,
+        })
+        
+        console.error('[Init] Missing required user info:', { openId, tenantKey })
+        return
+      }
+
+      console.log('[Init] User identity verified:', {
+        openId: openId.substring(0, 8) + '***',
+        tenantKey: tenantKey.substring(0, 8) + '***'
+      })
+
+      // 保存用户ID用于显示
+      userOpenId.value = openId
+      console.log('[Init] userOpenId set to:', userOpenId.value)
+
+      // =========================================================
+      // 核心流程：JWT Token 初始化
+      // =========================================================
+      
+      // 检查是否已有有效的 Token
+      const existingToken = localStorage.getItem('feishu_plugin_jwt_token')
+      const tokenExpiry = localStorage.getItem('feishu_plugin_jwt_expiry')
+      
+      let needInit = true
+      if (existingToken && tokenExpiry) {
+        const expiryTime = parseInt(tokenExpiry)
+        const now = Date.now()
+        // 如果 token 还有超过1小时有效期，则不需要重新初始化
+        if (expiryTime > now + 3600000) {
+          console.log('[Init] Using existing valid token')
+          needInit = false
+        }
+      }
+      
+      if (needInit) {
+        console.log('[Init] Initializing user and obtaining JWT token...')
+        
+        // 生成设备指纹
+        const fingerprint = generateFingerprint()
+        
+        try {
+          // 调用后端初始化接口
+          const initResult = await initUser(openId, tenantKey, fingerprint)
+          
+          // 保存 JWT Token
+          localStorage.setItem('feishu_plugin_jwt_token', initResult.token)
+          
+          // 保存过期时间（当前时间 + expires_in 秒）
+          const expiryTime = Date.now() + (initResult.expires_in * 1000)
+          localStorage.setItem('feishu_plugin_jwt_expiry', expiryTime.toString())
+          
+          console.log('[Init] JWT token obtained successfully, expires in:', initResult.expires_in, 'seconds')
+          
+        } catch (error) {
+          console.error('[Init] Failed to initialize user:', error)
+          
+          // 如果初始化失败，显示错误提示
+          ElMessageBox.alert(
+            '用户初始化失败，请刷新页面重试。如果问题持续存在，请联系管理员。',
+            '初始化失败',
+            {
+              confirmButtonText: '刷新页面',
+              type: 'error',
+              showClose: false,
+              callback: () => {
+                window.location.reload()
+              }
+            }
+          )
+          
+          throw error
+        }
+      }
+
+    } catch (e) {
+      console.error('[Init] Fatal error getting user info:', e)
+      // 阻止继续执行
+      return
     }
     
-    // 加载配额
-    await loadQuota(userInfo.value.openId, userInfo.value.tenantKey)
+    // 加载配额信息
+    await loadQuota()
   } catch (e) {
-    console.error(e)
+    console.error('[Init] Initialization failed:', e)
+    showToast('插件初始化失败，请刷新后重试', 'error')
   }
 }
 
@@ -223,7 +370,7 @@ async function uploadToField(fileOrBlob, fileName, mimeType) {
     // 消耗配额（非 VIP 用户需要扣减）
     if (!quota.value.inviteActive) {
       try {
-        await consumeQuota(userInfo.value.openId, userInfo.value.tenantKey, 'local_upload', fileName)
+        await consumeQuota('local_upload', fileName)
       } catch (err) {
         console.warn('[Quota] Failed to consume quota:', err)
       }
@@ -231,15 +378,15 @@ async function uploadToField(fileOrBlob, fileName, mimeType) {
     
     showToast('签名成功！', 'success', 2000)
     
-    await loadQuota(userInfo.value.openId, userInfo.value.tenantKey)
+    await loadQuota()
     
-    // 异步备份（带上用户信息）
+    // 异步备份
     if (authorized.value) {
       uploadSignature({
         blob: fileOrBlob,
         fileName,
-        openId: userInfo.value.openId,
-        tenantKey: userInfo.value.tenantKey,
+        folderToken: state.value.attachFieldId, // 使用字段ID作为文件夹标识
+        appToken: currentAppToken.value
       }).catch(err => console.warn('[Backup] Backup failed:', err))
     }
   } catch (e) {
@@ -401,7 +548,7 @@ async function executeBatchFill(recordIdList, blob) {
     // 消耗配额（批量操作按成功次数计算）
     if (!quota.value.inviteActive && successCount > 0) {
       try {
-        await consumeQuota(userInfo.value.openId, userInfo.value.tenantKey, 'batch_upload', 'batch_records', successCount)
+        await consumeQuota('batch_upload', 'batch_records', successCount)
       } catch (err) {
         console.warn('[Quota] Failed to consume quota:', err)
       }
@@ -416,16 +563,16 @@ async function executeBatchFill(recordIdList, blob) {
       showToast(`批量填充成功！已填充 ${successCount} 行`, 'success', 3000)
     }
     
-    await loadQuota(userInfo.value.openId, userInfo.value.tenantKey)
+    await loadQuota()
     
     // 异步备份
     if (authorized.value) {
       uploadSignature({
         blob,
         fileName,
-        openId: userInfo.value.openId,
-        tenantKey: userInfo.value.tenantKey,
-        hasQuota: true // 批量操作已扣除配额，上传时不需再次扣除
+        folderToken: state.value.attachFieldId,
+        hasQuota: true, // 批量操作已扣除配额，上传时不需再次扣除
+        appToken: currentAppToken.value
       }).catch(err => console.warn('[Backup] Backup failed:', err))
     }
   } catch (e) {
@@ -437,6 +584,11 @@ async function executeBatchFill(recordIdList, blob) {
       showToast(`批量填充失败：${errorMsg}`, 'error', 3000)
     }
   }
+}
+
+// 刷新配额
+async function refreshQuota() {
+  await loadQuota()
 }
 
 // 取消批量操作
@@ -486,10 +638,6 @@ function handleToast(event) {
   showToast(event.message, event.type, event.duration || 2000)
 }
 
-// 刷新配额
-async function refreshQuota() {
-  await loadQuota(userInfo.value.openId, userInfo.value.tenantKey)
-}
 
 onMounted(init)
 
@@ -506,6 +654,7 @@ onUnmounted(() => {
     <SignatureCard 
       :has-selection="hasSelection"
       :has-attach-field="!!state.attachFieldId"
+      :user-id="userOpenId"
       mode="signature"
       field-name="签名区域"
       @confirm="onConfirm"
@@ -530,7 +679,6 @@ onUnmounted(() => {
     <!-- 邀请码弹窗 -->
     <InviteDialog 
       v-model="showInviteDialog"
-      :user-info="userInfo"
       @close="onDialogClose"
       @success="refreshQuota"
       @toast="handleToast"
@@ -539,7 +687,6 @@ onUnmounted(() => {
     <!-- 充值弹窗 -->
     <RechargeDialog 
       v-model="showRechargeDialog"
-      :user-info="userInfo"
       :quota-info="quota"
       @close="onDialogClose"
       @success="refreshQuota"
@@ -559,6 +706,7 @@ onUnmounted(() => {
     <!-- 授权码配置弹窗 -->
     <BaseTokenDialog 
       v-model="showBaseTokenDialog"
+      :app-token="currentAppToken"
       @close="onDialogClose"
       @saved="() => showToast('授权码已保存', 'success')"
     />
@@ -570,6 +718,8 @@ onUnmounted(() => {
       :loading="batchSelectLoading"
       @confirm="handleBatchSelectionConfirmed"
     />
+
+    <!-- 顶部状态栏 -->
 
     <!-- 批量填充进度对话框 -->
     <el-dialog

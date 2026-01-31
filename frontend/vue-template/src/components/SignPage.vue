@@ -32,7 +32,12 @@
       <header class="form-header">
         <div class="header-pattern"></div>
         <h1>{{ formConfig?.name || '表单' }}</h1>
-        <p v-if="formConfig?.description">{{ formConfig.description }}</p>
+        <div 
+          v-if="formConfig?.description" 
+          class="form-description markdown-content"
+          v-html="parseMarkdown(formConfig.description)"
+        ></div>
+
       </header>
       
       <div class="form-body">
@@ -49,14 +54,18 @@
           </label>
           
           <!-- 文本输入 -->
-          <input 
-            v-if="field.input_type === 'text'"
-            :id="field.field_id"
-            v-model="formData[field.field_id]"
-            type="text"
-            :placeholder="field.placeholder || `请输入${field.label}`"
-            class="form-input"
-          />
+          <!-- 文本输入 (所见即所得编辑器) -->
+          <div v-if="field.input_type === 'text'" class="textarea-wrapper">
+             <div 
+               class="rich-editor"
+               contenteditable="true"
+               :data-placeholder="field.placeholder || `请输入${field.label}`"
+               @input="(e) => handleRichInput(e, field.field_id)"
+               @blur="(e) => handleRichBlur(e, field.field_id)"
+               @focus="(e) => handleRichFocus(e, field.field_id)"
+               v-html="getFieldHtml(field.field_id)"
+             ></div>
+          </div>
           
           <!-- 数字输入 -->
           <input 
@@ -145,96 +154,132 @@
             <span class="toggle-text">{{ field.label }}</span>
           </label>
           
+          <!-- 附件输入 -->
           <div v-else-if="field.input_type === 'attachment'" class="signature-section">
-            <!-- 模式切换 -->
-            <div class="mode-toggle">
-              <button 
-                type="button" 
-                class="mode-btn" 
-                :class="{ active: !uploadMode[field.field_id] }"
-                @click="uploadMode[field.field_id] = false"
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>
-                </svg>
-                签名
-              </button>
-              <button 
-                type="button" 
-                class="mode-btn" 
-                :class="{ active: uploadMode[field.field_id] }"
-                @click="uploadMode[field.field_id] = true"
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
-                </svg>
-                上传
-              </button>
-            </div>
             
-            <!-- 签名模式 -->
-            <div v-if="!uploadMode[field.field_id]" class="canvas-container" ref="containerRef">
-              <canvas 
-                ref="canvasRef"
-                @mousedown="startDrawing"
-                @mousemove="draw"
-                @mouseup="stopDrawing"
-                @mouseleave="stopDrawing"
-                @touchstart.prevent="handleTouchStart"
-                @touchmove.prevent="handleTouchMove"
-                @touchend="stopDrawing"
-              ></canvas>
-              <button type="button" class="clear-btn" @click="clearCanvas">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-                </svg>
-                清除
-              </button>
-              <p class="hint">请在上方区域签名</p>
-            </div>
+            <!-- 调试信息（开发时可见） -->
+            <!-- <div style="font-size: 10px; color: #999; padding: 4px;">
+              Debug: existingAttachments[{{ field.field_id }}] = {{ existingAttachments[field.field_id] }}
+            </div> -->
             
-            <!-- 上传模式 -->
-            <div v-else class="upload-area">
-              <input 
-                type="file" 
-                :id="'file-' + field.field_id"
-                @change="handleFileSelect($event, field.field_id)"
-                accept="image/*,.pdf,.doc,.docx"
-                class="file-input"
-              />
-              <label :for="'file-' + field.field_id" class="upload-box">
-                <template v-if="!selectedFiles[field.field_id]">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                    <polyline points="17 8 12 3 7 8"/>
-                    <line x1="12" y1="3" x2="12" y2="15"/>
+            <!-- 现有附件展示：简洁的文件信息卡片 -->
+            <div v-if="existingAttachments[field.field_id] && existingAttachments[field.field_id].length > 0" class="existing-attachments-simple">
+              <div class="existing-label">原始附件:</div>
+              <div v-for="(file, idx) in existingAttachments[field.field_id]" :key="idx" class="file-card-simple">
+                <svg class="file-icon-blue" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z"/>
+                  <path d="M14 2v6h6"/>
+                </svg>
+                <div class="file-info-simple">
+                  <div class="file-name-simple">{{ file?.name || '未命名文件' }}</div>
+                  <div class="file-type-simple">{{ file?.type || 'unknown' }}</div>
+                  <div class="file-status-simple">该记录已有附件，无需重复上传</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 输入区域：始终显示，允许用户覆盖 -->
+            <div class="attachment-input-area" :class="{ 'has-existing': existingAttachments[field.field_id]?.length > 0 }">
+              <!-- 模式切换 -->
+              <div class="mode-toggle">
+                <button 
+                  type="button" 
+                  class="mode-btn" 
+                  :class="{ active: !uploadMode[field.field_id] }"
+                  @click="uploadMode[field.field_id] = false"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>
                   </svg>
-                  <span>点击选择文件</span>
-                  <small>支持图片、PDF、Word</small>
-                </template>
-                <template v-else>
-                  <div class="file-preview">
+                  签名
+                </button>
+                <button 
+                  type="button" 
+                  class="mode-btn" 
+                  :class="{ active: uploadMode[field.field_id] }"
+                  @click="uploadMode[field.field_id] = true"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
+                  </svg>
+                  上传
+                </button>
+              </div>
+              
+              <!-- 签名模式 -->
+              <div v-if="!uploadMode[field.field_id]" class="canvas-container" :ref="setContainerRef(field.field_id)">
+                <canvas 
+                  :ref="setCanvasRef(field.field_id)"
+                  @mousedown="(e) => startDrawing(e, field.field_id)"
+                  @mousemove="(e) => draw(e, field.field_id)"
+                  @mouseup="() => stopDrawing(field.field_id)"
+                  @mouseleave="() => stopDrawing(field.field_id)"
+                  @touchstart.prevent="(e) => handleTouchStart(e, field.field_id)"
+                  @touchmove.prevent="(e) => handleTouchMove(e, field.field_id)"
+                  @touchend="() => stopDrawing(field.field_id)"
+                ></canvas>
+                <button type="button" class="clear-btn" @click="() => clearCanvas(field.field_id)">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                  </svg>
+                  清除
+                </button>
+                <p class="hint">请在上方区域签名</p>
+              </div>
+              
+              <!-- 上传模式 -->
+              <div v-else class="upload-area">
+                <input 
+                  type="file" 
+                  :id="'file-' + field.field_id"
+                  @change="handleFileSelect($event, field.field_id)"
+                  accept="image/*,.pdf,.doc,.docx"
+                  class="file-input"
+                />
+                <label :for="'file-' + field.field_id" class="upload-box">
+                  <template v-if="!selectedFiles[field.field_id]">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                      <polyline points="14 2 14 8 20 8"/>
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                      <polyline points="17 8 12 3 7 8"/>
+                      <line x1="12" y1="3" x2="12" y2="15"/>
                     </svg>
-                    <span>{{ selectedFiles[field.field_id].name }}</span>
-                    <button type="button" class="remove-file" @click.prevent="removeFile(field.field_id)">×</button>
-                  </div>
-                </template>
-              </label>
+                    <span>点击选择文件</span>
+                    <small>支持图片、PDF、Word</small>
+                  </template>
+                  <template v-else>
+                    <div class="file-preview">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                      </svg>
+                      <span>{{ selectedFiles[field.field_id].name }}</span>
+                      <button type="button" class="remove-file" @click.prevent="removeFile(field.field_id)">×</button>
+                    </div>
+                  </template>
+                </label>
+              </div>
             </div>
           </div>
           
-          <!-- 默认：文本区域 -->
-          <textarea
-            v-else
-            :id="field.field_id"
-            v-model="formData[field.field_id]"
-            :placeholder="field.placeholder || `请输入${field.label}`"
-            class="form-textarea"
-            rows="3"
-          ></textarea>
+          <!-- 默认：文本区域 (支持 Markdown 预览和自动高度) -->
+          <div v-else class="textarea-wrapper">
+             <!-- Markdown 预览（当有内容时显示） -->
+             <div 
+               v-if="formData[field.field_id]" 
+               class="markdown-preview"
+               v-html="parseMarkdown(formData[field.field_id])"
+             ></div>
+             
+             <!-- 输入框（始终显示，自动调整高度） -->
+             <textarea
+              :id="field.field_id"
+              :ref="el => { if (el) textareaRefs[field.field_id] = el }"
+              v-model="formData[field.field_id]"
+              :placeholder="field.placeholder || `请输入${field.label}`"
+              class="form-textarea auto-resize"
+              @input="autoResize"
+            ></textarea>
+          </div>
           
           <!-- 错误提示 -->
           <span v-if="fieldErrors[field.field_id]" class="error-msg">
@@ -293,8 +338,11 @@
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick, computed, watch } from 'vue'
+import { ref, onMounted, nextTick, computed, watch, reactive } from 'vue'
 import { getFormRecordData } from '@/services/api'
+import { marked } from 'marked'
+import { htmlToMarkdown } from '@/utils/htmlToMarkdown'
+
 
 // 从 URL 获取表单 ID
 const formId = new URLSearchParams(window.location.search).get('id') || ''
@@ -315,6 +363,8 @@ const toastType = ref('info')
 // 上传模式状态（每个附件字段独立）
 const uploadMode = ref({})
 const selectedFiles = ref({})
+// 现有附件数据
+const existingAttachments = ref({})
 
 // 显示 Toast
 function showToast(msg, type = 'info', duration = 2000) {
@@ -325,12 +375,158 @@ function showToast(msg, type = 'info', duration = 2000) {
   }, duration)
 }
 
-// 画布相关
-const canvasRef = ref(null)
-const containerRef = ref(null)
-let ctx = null
-let isDrawing = false
-let hasSignature = false
+// 解析 Markdown
+function parseMarkdown(text) {
+  if (!text) return ''
+  try {
+    // 确保 marked 已加载
+    if (!marked || typeof marked.parse !== 'function') {
+      console.warn('[SignPage] marked library not loaded correctly', marked)
+      return text
+    }
+    return marked.parse(String(text))
+  } catch (e) {
+    console.error('[SignPage] Markdown parsing error:', e)
+    return text
+  }
+}
+
+// 检查是否为图片
+function isImage(file) {
+  if (!file) return false
+
+  const name = String(file.name || '')
+  const type = String(file.type || '')
+  const url = String(file.url || '')
+
+  if (type && type.startsWith('image/')) return true
+  if (/\.(jpg|jpeg|png|gif|webp|bmp|svg)$/i.test(name)) return true
+
+  const urlPath = url.split('?')[0].split('#')[0]
+  return /\.(jpg|jpeg|png|gif|webp|bmp|svg)$/i.test(urlPath)
+}
+
+// 自动调整文本域高度
+function autoResize(event) {
+  const el = event?.target
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = el.scrollHeight + 'px'
+}
+
+// 调整所有文本域高度
+function resizeAllTextareas() {
+  nextTick(() => {
+    setTimeout(() => {
+      console.log('[SignPage] Resizing all textareas...')
+      let count = 0
+      
+      // 使用 refs 调整高度
+      Object.entries(textareaRefs).forEach(([fieldId, el]) => {
+        if (el && el.tagName === 'TEXTAREA') {
+          const oldHeight = el.style.height
+          el.style.height = 'auto'
+          el.style.height = el.scrollHeight + 'px'
+          console.log(`[SignPage] Resized textarea ${fieldId}: ${oldHeight} -> ${el.style.height}, scrollHeight: ${el.scrollHeight}`)
+          count++
+        }
+      })
+      
+      // 备用：使用 querySelector
+      document.querySelectorAll('textarea.form-textarea').forEach(el => {
+        if (!el.style.height || el.style.height === 'auto') {
+          el.style.height = 'auto'
+          el.style.height = el.scrollHeight + 'px'
+          console.log(`[SignPage] Resized textarea (querySelector): ${el.id}, height: ${el.style.height}`)
+          count++
+        }
+      })
+      
+      console.log(`[SignPage] Total textareas resized: ${count}`)
+    }, 200)
+  })
+}
+
+// 画布相关（按字段独立维护，避免多个附件字段互相影响）
+const canvasRefs = ref({})
+const containerRefs = ref({})
+const canvasCtx = ref({})
+const drawingState = ref({})
+const hasSignatureMap = ref({})
+
+const textareaRefs = reactive({})
+const editingRichFields = ref({})
+// 存储每个字段的当前 HTML 显示内容，避免编辑时被重置
+const fieldHtmlContent = ref({})
+
+// 获取字段 HTML
+function getFieldHtml(fieldId) {
+  // 如果首次加载还没有 HTML 内容，且有 Markdown 数据，则生成
+  if (fieldHtmlContent.value[fieldId] === undefined) {
+      const md = formData.value[fieldId] || ''
+      fieldHtmlContent.value[fieldId] = parseMarkdown(md)
+  }
+  return fieldHtmlContent.value[fieldId] || ''
+}
+
+function handleRichFocus(e, fieldId) {
+  editingRichFields.value[fieldId] = true
+}
+
+function handleRichBlur(e, fieldId) {
+  editingRichFields.value[fieldId] = false
+  // 失去焦点时，根据最新的 markdown 重新生成 HTML，实现"格式化"效果 (Snap format)
+  const md = formData.value[fieldId] || ''
+  fieldHtmlContent.value[fieldId] = parseMarkdown(md)
+}
+
+function handleRichInput(e, fieldId) {
+  const html = e.target.innerHTML
+  
+  // 更新 Markdown 数据 (Model)
+  const md = htmlToMarkdown(html)
+  formData.value[fieldId] = md
+  // 注意：此处不要更新 fieldHtmlContent，否则会重置光标
+}
+
+function getHasSignature(fieldId) {
+  return !!hasSignatureMap.value[fieldId]
+}
+
+function setHasSignature(fieldId, val) {
+  hasSignatureMap.value[fieldId] = !!val
+}
+
+function ensureDrawingState(fieldId) {
+  if (!drawingState.value[fieldId]) {
+    drawingState.value[fieldId] = { isDrawing: false }
+  }
+  return drawingState.value[fieldId]
+}
+
+function setCanvasRef(fieldId) {
+  return (el) => {
+    if (el) canvasRefs.value[fieldId] = el
+  }
+}
+
+function setContainerRef(fieldId) {
+  return (el) => {
+    if (el) containerRefs.value[fieldId] = el
+  }
+}
+
+function getCanvasElement(fieldId) {
+  return canvasRefs.value[fieldId] || null
+}
+
+function getContainerElement(fieldId) {
+  return containerRefs.value[fieldId] || null
+}
+
+function getCtx(fieldId) {
+  return canvasCtx.value[fieldId] || null
+}
 
 // 是否包含附件字段
 const hasAttachmentField = computed(() => {
@@ -365,80 +561,67 @@ async function loadFormConfig() {
     })
     
     // 如果启用了显示数据功能，预填充记录数据
-    console.log('[SignPage] 检查预填充条件:', {
-      show_data: formConfig.value.show_data,
-      record_index: formConfig.value.record_index,
-      form_id: formId
-    })
-    
     if (formConfig.value.show_data && formConfig.value.record_index > 0) {
       try {
-        console.log('[SignPage] 开始加载记录数据...')
         const recordDataResult = await getFormRecordData(formId)
-        console.log('[SignPage] 记录数据响应:', recordDataResult)
         
         if (recordDataResult && recordDataResult.success && recordDataResult.data) {
           const recordData = recordDataResult.data
-          console.log('[SignPage] 解析后的记录数据:', recordData)
-          console.log('[SignPage] 记录数据中的所有字段ID:', Object.keys(recordData))
-          console.log('[SignPage] 表单字段列表:', formConfig.value.fields?.map(f => ({ id: f.field_id, label: f.label, type: f.input_type })))
           
-          let filledCount = 0
-          // 填充数据到表单
           formConfig.value.fields?.forEach(field => {
-            // 检查字段ID是否存在于记录数据中
-            const fieldExists = recordData.hasOwnProperty(field.field_id)
-            console.log(`[SignPage] 检查字段 ${field.field_id} (${field.label}): 存在=${fieldExists}, 值=`, recordData[field.field_id])
-            
-            if (fieldExists) {
+            if (recordData.hasOwnProperty(field.field_id)) {
               const value = recordData[field.field_id]
-              console.log(`[SignPage] 填充字段 ${field.field_id} (${field.label}):`, value)
               
-              // 根据字段类型处理数据
               if (field.input_type === 'multiselect') {
-                // 多选：确保是数组
                 formData.value[field.field_id] = Array.isArray(value) ? value : (value ? [value] : [])
               } else if (field.input_type === 'checkbox') {
-                // 复选框：布尔值
                 formData.value[field.field_id] = Boolean(value)
               } else if (field.input_type === 'attachment') {
-                // 附件：如果有数据，显示提示（不实际预填充文件）
+                // 处理附件字段：如果有现有数据，保存到 existingAttachments
+                console.log(`[SignPage] Loading attachment for field ${field.field_id}:`, value)
                 if (value && Array.isArray(value) && value.length > 0) {
-                  // 附件字段已有数据，但不预填充文件，用户仍需上传
-                  // 可以在这里添加提示信息
+                  existingAttachments.value[field.field_id] = value
+                  console.log(`[SignPage] Existing attachments set for field ${field.field_id}:`, existingAttachments.value[field.field_id])
                 }
               } else {
-                // 文本、数字、日期、单选等：直接赋值
                 formData.value[field.field_id] = value !== null && value !== undefined ? String(value) : ''
+                // 预填充时同时生成 HTML
+                if (field.input_type === 'text') {
+                   fieldHtmlContent.value[field.field_id] = parseMarkdown(formData.value[field.field_id])
+                }
               }
-              filledCount++
-            } else {
-              console.log(`[SignPage] 字段 ${field.field_id} (${field.label}) 在记录数据中不存在`)
             }
           })
           
-          console.log(`[SignPage] 预填充完成，共填充 ${filledCount} 个字段`)
-          console.log('[SignPage] 最终表单数据:', formData.value)
-        } else {
-          console.warn('[SignPage] 记录数据格式不正确:', recordDataResult)
-        }
+          // 数据填充后立即调整文本域高度
+          resizeAllTextareas()
+        } 
       } catch (e) {
         console.error('[SignPage] 预填充数据失败:', e)
-        console.error('[SignPage] 错误详情:', e.response?.data || e.message)
-        console.error('[SignPage] 错误堆栈:', e.stack)
-        // 显示错误提示给用户
         const errorMsg = e.response?.data?.detail || e.message || '加载记录数据失败'
         showToast(`预填充数据失败: ${errorMsg}`, 'warning')
-        // 预填充失败不影响表单正常使用，只记录警告
       }
-    } else {
-      console.log('[SignPage] 未启用显示数据功能，跳过预填充')
     }
     
     loading.value = false
     
-    await nextTick()
-    initCanvas()
+    // 调整所有文本域高度
+    resizeAllTextareas()
+
+    // 初始化每个附件字段的画布（只初始化签名模式的字段）
+    const attachFields = (formConfig.value?.fields || []).filter(f => f.input_type === 'attachment')
+    for (const field of attachFields) {
+      const fieldId = field.field_id
+      
+      // 如果该字段没有现有附件，且不是上传模式，则初始化画布
+      const hasExisting = existingAttachments.value[fieldId]?.length > 0
+      const isUploadMode = uploadMode.value[fieldId] === true
+      
+      if (!hasExisting && !isUploadMode) {
+        console.log(`[SignPage] Initializing canvas for field: ${fieldId}`)
+        initCanvas(fieldId)
+      }
+    }
   } catch (e) {
     error.value = { title: '加载失败', message: e.message }
     loading.value = false
@@ -446,60 +629,55 @@ async function loadFormConfig() {
 }
 
 // 初始化画布
-function initCanvas() {
-  // 使用 requestAnimationFrame 确保 DOM 完全渲染后再初始化
+function initCanvas(fieldId) {
   const tryInitCanvas = (attempt = 0) => {
     if (attempt > 10) {
+      console.warn(`[SignPage] Failed to initialize canvas for field ${fieldId} after 10 attempts`)
       return
     }
-    
-    // ref 在 v-for 中可能是数组
-    const cvs = Array.isArray(canvasRef.value) ? canvasRef.value[0] : canvasRef.value
-    const container = Array.isArray(containerRef.value) ? containerRef.value[0] : containerRef.value
-    
+
+    const cvs = getCanvasElement(fieldId)
+    const container = getContainerElement(fieldId)
+
     if (!cvs || !container) {
-      // 如果 canvas 还不存在，可能是因为默认进入了上传模式，跳过
-      return
-    }
-    
-    // 确保容器有宽度
-    if (container.clientWidth === 0) {
+      console.log(`[SignPage] Canvas or container not found for field ${fieldId}, attempt ${attempt}`)
       setTimeout(() => tryInitCanvas(attempt + 1), 100)
       return
     }
-    
-    cvs.width = container.clientWidth
-    cvs.height = 200
-    
-    ctx = cvs.getContext('2d')
-    if (!ctx) {
-      console.warn('Failed to get canvas 2d context')
+
+    if (container.clientWidth === 0) {
+      console.log(`[SignPage] Container width is 0 for field ${fieldId}, attempt ${attempt}`)
+      setTimeout(() => tryInitCanvas(attempt + 1), 100)
       return
     }
-    
+
+    cvs.width = container.clientWidth
+    cvs.height = 200
+
+    const ctx = cvs.getContext('2d')
+    if (!ctx) {
+      console.error(`[SignPage] Failed to get 2d context for field ${fieldId}`)
+      return
+    }
+
+    canvasCtx.value[fieldId] = ctx
+
     ctx.strokeStyle = '#1d1d1f'
     ctx.lineWidth = 2
     ctx.lineCap = 'round'
     ctx.lineJoin = 'round'
-    
-    // 白色背景
+
     ctx.fillStyle = '#fff'
     ctx.fillRect(0, 0, cvs.width, cvs.height)
     
-
+    console.log(`[SignPage] Canvas initialized successfully for field ${fieldId}`)
   }
-  
-  // 延迟初始化
+
   setTimeout(() => tryInitCanvas(0), 150)
 }
 
-// 获取 canvas 元素
-function getCanvasElement() {
-  return Array.isArray(canvasRef.value) ? canvasRef.value[0] : canvasRef.value
-}
-
-function getPos(e) {
-  const cvs = getCanvasElement()
+function getPos(e, fieldId) {
+  const cvs = getCanvasElement(fieldId)
   if (!cvs) return { x: 0, y: 0 }
   const rect = cvs.getBoundingClientRect()
   return {
@@ -508,53 +686,72 @@ function getPos(e) {
   }
 }
 
-function startDrawing(e) {
+function startDrawing(e, fieldId) {
+  const ctx = getCtx(fieldId)
   if (!ctx) return
-  isDrawing = true
-  hasSignature = true
-  const pos = getPos(e)
+
+  const st = ensureDrawingState(fieldId)
+  st.isDrawing = true
+  setHasSignature(fieldId, true)
+
+  const pos = getPos(e, fieldId)
   ctx.beginPath()
   ctx.moveTo(pos.x, pos.y)
 }
 
-function draw(e) {
-  if (!isDrawing || !ctx) return
-  const pos = getPos(e)
+function draw(e, fieldId) {
+  const ctx = getCtx(fieldId)
+  const st = ensureDrawingState(fieldId)
+  if (!st.isDrawing || !ctx) return
+
+  const pos = getPos(e, fieldId)
   ctx.lineTo(pos.x, pos.y)
   ctx.stroke()
 }
 
-function stopDrawing() {
-  isDrawing = false
+function stopDrawing(fieldId) {
+  const st = ensureDrawingState(fieldId)
+  st.isDrawing = false
 }
 
-function handleTouchStart(e) {
-  const cvs = getCanvasElement()
+function handleTouchStart(e, fieldId) {
+  const cvs = getCanvasElement(fieldId)
+  const ctx = getCtx(fieldId)
   if (!cvs || !ctx) return
+
   const touch = e.touches[0]
   const rect = cvs.getBoundingClientRect()
-  isDrawing = true
-  hasSignature = true
+  const st = ensureDrawingState(fieldId)
+
+  st.isDrawing = true
+  setHasSignature(fieldId, true)
+
   ctx.beginPath()
   ctx.moveTo(touch.clientX - rect.left, touch.clientY - rect.top)
 }
 
-function handleTouchMove(e) {
-  if (!isDrawing || !ctx) return
-  const cvs = getCanvasElement()
+function handleTouchMove(e, fieldId) {
+  const ctx = getCtx(fieldId)
+  const st = ensureDrawingState(fieldId)
+  if (!st.isDrawing || !ctx) return
+
+  const cvs = getCanvasElement(fieldId)
   if (!cvs) return
+
   const touch = e.touches[0]
   const rect = cvs.getBoundingClientRect()
   ctx.lineTo(touch.clientX - rect.left, touch.clientY - rect.top)
   ctx.stroke()
 }
 
-function clearCanvas() {
-  const cvs = getCanvasElement()
+function clearCanvas(fieldId) {
+  const cvs = getCanvasElement(fieldId)
+  const ctx = getCtx(fieldId)
   if (!ctx || !cvs) return
+
   ctx.fillStyle = '#fff'
   ctx.fillRect(0, 0, cvs.width, cvs.height)
-  hasSignature = false
+  setHasSignature(fieldId, false)
 }
 
 // 选择文件
@@ -574,32 +771,44 @@ function removeFile(fieldId) {
 function validateForm() {
   fieldErrors.value = {}
   let valid = true
-  
+
+  const attachFields = (formConfig.value?.fields || []).filter(f => f.input_type === 'attachment')
+
+  // 手工验证：两个附件字段分别校验 / 阻断
+  if (attachFields.length === 2) {
+    for (const field of attachFields) {
+      if (!field.required) continue
+
+      const hasExisting = (existingAttachments.value[field.field_id]?.length || 0) > 0
+      if (hasExisting) continue
+
+      const isUpload = !!uploadMode.value[field.field_id]
+      if (isUpload) {
+        if (!selectedFiles.value[field.field_id]) {
+          fieldErrors.value[field.field_id] = '请选择文件'
+          valid = false
+        }
+      } else {
+        if (!getHasSignature(field.field_id)) {
+          fieldErrors.value[field.field_id] = '请签名'
+          valid = false
+        }
+      }
+    }
+  }
+
   for (const field of formConfig.value?.fields || []) {
+    if (field.input_type === 'attachment') continue
+
     if (field.required) {
       const val = formData.value[field.field_id]
-      
+
       if (field.input_type === 'multiselect') {
         if (!val || val.length === 0) {
           fieldErrors.value[field.field_id] = '请选择至少一项'
           valid = false
         }
-      } else if (field.input_type === 'attachment') {
-        // 检查签名模式或上传模式是否有内容
-        const isUpload = uploadMode.value[field.field_id]
-        if (isUpload) {
-          if (!selectedFiles.value[field.field_id]) {
-            fieldErrors.value[field.field_id] = '请选择文件'
-            valid = false
-          }
-        } else {
-          if (!hasSignature) {
-            fieldErrors.value[field.field_id] = '请签名'
-            valid = false
-          }
-        }
       } else if (field.input_type === 'checkbox') {
-        // 复选框不强制必选
       } else {
         if (!val && val !== 0) {
           fieldErrors.value[field.field_id] = `请填写${field.label}`
@@ -607,8 +816,7 @@ function validateForm() {
         }
       }
     }
-    
-    // 格式验证
+
     const val = formData.value[field.field_id]
     if (val) {
       if (field.input_type === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val)) {
@@ -621,8 +829,43 @@ function validateForm() {
       }
     }
   }
-  
+
   return valid
+}
+
+
+
+function getFileUrl(fileOrUrl) {
+  // 如果传入的是 file 对象
+  if (typeof fileOrUrl === 'object' && fileOrUrl !== null) {
+      // 优先使用临时下载链接（如果有）
+      if (fileOrUrl.temp_url) {
+          console.log('[getFileUrl] Using temp_url:', fileOrUrl.temp_url)
+          return fileOrUrl.temp_url
+      }
+      
+      if (fileOrUrl.file_token) {
+          // 使用后端代理 (需要 formId 来获取授权)
+          const proxyUrl = `${API_BASE}/api/form/proxy/media/${formId}/${fileOrUrl.file_token}`
+          console.log('[getFileUrl] Using proxy for file_token:', fileOrUrl.file_token, '-> URL:', proxyUrl)
+          return proxyUrl
+      }
+      // 如果对象有 url 属性，递归处理
+      if (fileOrUrl.url) {
+          console.log('[getFileUrl] No file_token, using url:', fileOrUrl.url)
+          return getFileUrl(fileOrUrl.url)
+      }
+      return ''
+  }
+
+  const url = fileOrUrl
+  if (!url) return ''
+  if (url.startsWith('http') || url.startsWith('//') || url.startsWith('blob:')) {
+    return url
+  }
+  // Remove leading slash if present to avoid double slashes
+  const cleanUrl = url.startsWith('/') ? url.slice(1) : url
+  return `${API_BASE}/${cleanUrl}`
 }
 
 // 提交表单
@@ -635,25 +878,27 @@ async function submitForm() {
   try {
     const fd = new FormData()
     
-    // 获取附件字段
-    const attachField = formConfig.value?.fields?.find(f => f.input_type === 'attachment')
-    
-    if (attachField) {
-      const isUpload = uploadMode.value[attachField.field_id]
-      
-      if (isUpload && selectedFiles.value[attachField.field_id]) {
-        // 文件上传模式
+    // 获取附件字段（支持多个）
+    const attachFields = formConfig.value?.fields?.filter(f => f.input_type === 'attachment') || []
+
+    // 对每个附件字段，按各自的模式提交对应文件/签名
+    for (const attachField of attachFields) {
+      const fieldId = attachField.field_id
+      const isUpload = !!uploadMode.value[fieldId]
+
+      if (isUpload && selectedFiles.value[fieldId]) {
         submitProgress.value = '正在上传文件...'
-        fd.append('signature', selectedFiles.value[attachField.field_id])
-      } else if (!isUpload && hasSignature) {
-        // 签名模式
-        const cvs = getCanvasElement()
+        fd.append(`attachment_${fieldId}`, selectedFiles.value[fieldId])
+      } else if (!isUpload && getHasSignature(fieldId)) {
+        const cvs = getCanvasElement(fieldId)
         if (cvs) {
           submitProgress.value = '正在上传签名...'
           const blob = await new Promise(resolve => {
             cvs.toBlob(resolve, 'image/png')
           })
-          fd.append('signature', blob, 'signature.png')
+          if (blob) {
+            fd.append(`attachment_${fieldId}`, blob, `signature_${fieldId}.png`)
+          }
         }
       }
     }
@@ -682,22 +927,34 @@ async function submitForm() {
   }
 }
 
-// 监听上传模式切换，当切换到签名模式时重新初始化画布
+// 监听表单数据变化，自动调整文本域高度
+watch(formData, () => {
+  resizeAllTextareas()
+}, { deep: true })
+
 watch(uploadMode, (newVal, oldVal) => {
-  // 遍历所有字段，检查是否有从 true 切换到 false（即从上传模式切换到签名模式）
+  // 当任何字段从上传模式切换到签名模式时，初始化该字段的画布
   for (const fieldId in newVal) {
-    if (oldVal[fieldId] === true && newVal[fieldId] === false) {
-      // 需要异步等待 DOM 更新后再初始化画布
+    const wasUpload = oldVal[fieldId] === true
+    const isSignature = newVal[fieldId] === false
+    
+    if (wasUpload && isSignature) {
+      // 从上传切换到签名，需要初始化画布
       nextTick(() => {
-        initCanvas()
+        console.log(`[SignPage] Initializing canvas for field: ${fieldId}`)
+        initCanvas(fieldId)
       })
-      break
     }
   }
 }, { deep: true })
 
 onMounted(() => {
   loadFormConfig()
+  
+  // 确保在挂载后也调整一次
+  setTimeout(() => {
+    resizeAllTextareas()
+  }, 500)
 })
 </script>
 
@@ -799,6 +1056,245 @@ onMounted(() => {
   color: #86868b;
 }
 
+/* 新增样式 */
+.textarea-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 富文本编辑器 */
+.rich-editor {
+  width: 100%;
+  min-height: 80px;         /* Match form-textarea minimum height */
+  overflow-y: hidden;       /* Hide scrollbar as it auto-expands */
+  padding: 12px 14px;       /* Match form-textarea padding */
+  border: 1px solid #e5e6eb; /* Match form-textarea border */
+  border-radius: 8px;       /* Match form-textarea radius */
+  font-size: 15px;          /* Match form-textarea font size */
+  color: #1d1d1f;           /* Match form-textarea color */
+  background: #f5f6f7;      /* Match form-textarea background */
+  transition: all 0.2s;
+  outline: none;
+  line-height: 1.6;
+  box-sizing: border-box;
+}
+
+.rich-editor:focus {
+  border-color: #3370ff;
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(51, 112, 255, 0.1);
+}
+
+.rich-editor:empty:before {
+  content: attr(data-placeholder);
+  color: #9ca3af;
+  pointer-events: none;
+  display: block;
+}
+
+/* 编辑器内部 Markdown 样式适配 */
+.rich-editor h1, .rich-editor h2, .rich-editor h3 { 
+  margin-top: 0.5em; 
+  margin-bottom: 0.5em; 
+  font-weight: 600; 
+  color: #1f2329;
+}
+.rich-editor p { margin-bottom: 0.5em; }
+.rich-editor ul, .rich-editor ol { padding-left: 20px; margin-bottom: 0.5em; }
+.rich-editor li { list-style-type: disc; }
+.rich-editor blockquote {
+  border-left: 4px solid #ddd;
+  padding-left: 10px;
+  color: #666;
+  margin: 10px 0;
+}
+
+/* Removed duplicate .form-textarea rule - see unified rule below */
+
+/* 附件展示 - 简洁版 */
+.existing-attachments-simple {
+  margin-bottom: 16px;
+}
+
+.existing-label {
+  font-size: 13px;
+  color: #86868b;
+  margin-bottom: 8px;
+}
+
+.file-card-simple {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+  background: #fff;
+  border: 1px solid #e5e5ea;
+  border-radius: 12px;
+  margin-bottom: 12px;
+}
+
+.file-icon-blue {
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+  color: #007aff;
+}
+
+.file-info-simple {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.file-name-simple {
+  font-size: 15px;
+  font-weight: 500;
+  color: #1d1d1f;
+  word-break: break-all;
+}
+
+.file-type-simple {
+  font-size: 13px;
+  color: #86868b;
+}
+
+.file-status-simple {
+  font-size: 13px;
+  color: #34c759;
+  margin-top: 4px;
+}
+
+.attachment-input-area.has-existing {
+  margin-top: 0;
+}
+.image-preview {
+  cursor: pointer;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #e5e5ea;
+  transition: all 0.2s;
+  max-width: 100%;
+}
+.image-preview:hover {
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  transform: translateY(-2px);
+}
+.image-preview img {
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: 300px;
+  display: block;
+  object-fit: contain;
+  background: #fff;
+}
+.image-error {
+  display: block;
+  padding: 20px;
+  color: #ff4d4f;
+  font-size: 13px;
+  text-align: center;
+}
+.file-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  background: #f5f5f7;
+  border-radius: 8px;
+  text-decoration: none;
+  color: #1d1d1f;
+  transition: all 0.2s;
+  width: 100%;
+}
+.file-link:hover {
+  background: #e8e8ed;
+}
+.file-link.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.file-icon {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: #86868b;
+}
+.file-name {
+  font-size: 14px;
+  word-break: break-all;
+}
+.file-note {
+  font-size: 12px;
+  color: #999;
+  margin-left: 8px;
+}
+
+/* 文件信息卡片 */
+.file-info-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px;
+  background: #fff;
+  border-radius: 12px;
+  border: 2px solid #e5e5ea;
+  width: 100%;
+}
+
+/* 图片预览包装器 */
+.image-preview-wrapper {
+  width: 100%;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 2px solid #e5e5ea;
+  background: #fff;
+}
+.attachment-image {
+  width: 100%;
+  height: auto;
+  max-height: 400px;
+  object-fit: contain;
+  display: block;
+}
+
+.image-preview img:hover {
+  /* 移除transform，已在父元素处理 */
+}
+.file-link {
+  display: flex;
+  align-items: center;
+  font-size: 14px;
+  color: #007aff;
+  text-decoration: none;
+  background: #fff;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid #e5e5ea;
+  transition: background 0.2s;
+  max-width: 100%;
+}
+.file-link:hover {
+  background: #f2f2f7;
+}
+.file-link.is-disabled {
+  color: #86868b;
+  cursor: not-allowed;
+}
+.file-name {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-icon {
+  width: 18px;
+  height: 18px;
+}
+
 /* 表单容器 */
 .form-container {
   max-width: 500px;
@@ -892,8 +1388,11 @@ onMounted(() => {
 }
 
 .form-textarea {
-  resize: none;
   min-height: 80px;
+  max-height: none;
+  overflow-y: hidden;
+  resize: none; /* 禁用手动调整，使用自动调整 */
+  line-height: 1.6;
 }
 
 .date-input {
@@ -1309,5 +1808,38 @@ onMounted(() => {
 .toast-fade-leave-to {
   opacity: 0;
   transform: scale(0.9);
+}
+/* Markdown 内容样式 */
+.markdown-content {
+  font-size: 14px;
+  color: #86868b;
+  line-height: 1.6;
+  text-align: left;
+  margin-top: 8px;
+}
+
+.markdown-content p {
+  margin-bottom: 8px;
+}
+
+.markdown-content ul, .markdown-content ol {
+  padding-left: 20px;
+  margin-bottom: 8px;
+}
+
+.markdown-content a {
+  color: #007aff;
+  text-decoration: none;
+}
+
+.markdown-content a:hover {
+  text-decoration: underline;
+}
+
+.markdown-content blockquote {
+  border-left: 4px solid #e5e5ea;
+  padding-left: 12px;
+  color: #86868b;
+  margin: 8px 0;
 }
 </style>

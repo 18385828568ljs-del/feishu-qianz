@@ -1,5 +1,10 @@
 <script setup>
-// 使用 Vue Router
+import { useRoute } from 'vue-router'
+import { computed } from 'vue'
+
+const route = useRoute()
+// 只在主页显示备案号，分享表单页面不显示
+const showFooter = computed(() => route.path === '/')
 </script>
 
 <template>
@@ -7,7 +12,7 @@
     <main>
       <router-view />
     </main>
-    <footer class="icp-footer">
+    <footer v-if="showFooter" class="icp-footer">
       <a href="https://beian.miit.gov.cn/" target="_blank">浙ICP备2025220033号-1</a>
     </footer>
   </div>

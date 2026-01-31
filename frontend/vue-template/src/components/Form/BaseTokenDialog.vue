@@ -13,28 +13,51 @@ const props = defineProps({
   modelValue: {
     type: Boolean,
     default: false
+  },
+  appToken: {
+    type: String,
+    default: ''
   }
 })
 
 const emit = defineEmits(['update:modelValue', 'close', 'saved'])
 
 // Composables
-const { baseToken, setBaseToken, hasBaseToken } = useBaseToken()
+const { currentBaseToken, setBaseToken, hasBaseToken, getBaseToken, setCurrentAppToken: setCurrentAppTokenInComposable } = useBaseToken()
 
 // State
-const inputToken = ref(baseToken.value)
+const inputToken = ref('')
+
+// 计算当前是否已配置（基于 appToken）
+const isConfigured = computed(() => {
+  if (!props.appToken) return false
+  return !!getBaseToken(props.appToken)
+})
 
 // Watchers
 watch(() => props.modelValue, (newVal) => {
   if (newVal) {
-    inputToken.value = baseToken.value
+    // 当弹窗打开时，加载当前表格的授权码
+    inputToken.value = props.appToken ? getBaseToken(props.appToken) : currentBaseToken.value
   }
 })
 
 // Actions
 function handleSave() {
   const token = inputToken.value.trim()
-  setBaseToken(token)
+  if (!props.appToken) {
+    console.warn('[BaseTokenDialog] No appToken provided')
+    return
+  }
+  
+  console.log('[BaseTokenDialog] Saving token for appToken:', props.appToken)
+  setBaseToken(props.appToken, token)
+  
+  // 保存后立即设置为当前表格
+  setCurrentAppTokenInComposable(props.appToken)
+  
+  console.log('[BaseTokenDialog] Token saved and currentAppToken set')
+  
   emit('saved', token)
   emit('update:modelValue', false)
 }
@@ -78,6 +101,7 @@ function handleClear() {
       <div class="input-section">
         <div class="help-link-wrapper">
           <p class="input-hint">为了保护数据安全，请配置您的授权码：</p>
+          <p class="info-desc">授权码是针对每个多维表格的，切换表格后需要重新配置</p>
           <a 
             class="info-link" 
             href="https://dcnpj27i4okj.feishu.cn/docx/BP8kdlxCeoLtyQxlVBacg51Ynpe" 
@@ -97,12 +121,8 @@ function handleClear() {
       </div>
 
       <!-- 状态提示 -->
-      <div v-if="hasBaseToken" class="status-tip success">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg>
-        <span>当前已配置授权码</span>
-      </div>
-      <div v-else class="status-tip warning">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>
+      <div v-if="!isConfigured" class="status-tip warning">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4m0-4h.01"/></svg>
         <span>未配置，无法上传签名</span>
       </div>
 
@@ -195,14 +215,21 @@ function handleClear() {
   margin-bottom: 12px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
 }
 
 .input-hint {
   font-size: 14px;
   font-weight: 600;
   color: #1d1d1f;
-  margin-bottom: 4px;
+  margin: 0;
+}
+
+.info-desc {
+  font-size: 13px;
+  color: #646a73;
+  line-height: 1.5;
+  margin: 0;
 }
 
 .info-link {

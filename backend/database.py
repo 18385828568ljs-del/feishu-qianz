@@ -126,8 +126,7 @@ class UserSignForm(UserBase):
     table_id = Column(String(64), nullable=False)
     signature_field_id = Column(String(64), nullable=False)
     extra_fields = Column(Text, nullable=True)
-    creator_session_id = Column(String(64), nullable=True)
-    creator_refresh_token = Column(Text, nullable=True)
+    # creator_session_id 和 creator_refresh_token 已移除（未使用的遗留字段）
     is_active = Column(Boolean, default=True, nullable=False)
     expires_at = Column(DateTime, nullable=True)
     record_index = Column(Integer, default=1, nullable=False)
@@ -137,16 +136,7 @@ class UserSignForm(UserBase):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
-class UserOAuthSession(UserBase):
-    """OAuth Session 存储表（用户库专用）"""
-    __tablename__ = "oauth_sessions"
-    
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    session_id = Column(String(128), unique=True, nullable=False, index=True)
-    session_data = Column(Text, nullable=False)
-    expires_at = Column(DateTime, nullable=False, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+# UserOAuthSession 已移除（未使用的遗留代码）
 
 
 # ========== 以下为兼容旧逻辑的共享库模型 ==========
@@ -318,23 +308,7 @@ class SignForm(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
-class OAuthSession(Base):
-    """OAuth Session 存储表（替代 Redis）"""
-    __tablename__ = "oauth_sessions"
-    
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    session_id = Column(String(128), unique=True, nullable=False, index=True)  # 会话ID
-    
-    # Session 数据（JSON格式存储）
-    # 包含: access_token, refresh_token, expires_at, user 等信息
-    session_data = Column(Text, nullable=False)
-    
-    # 过期时间
-    expires_at = Column(DateTime, nullable=False, index=True)
-    
-    # 时间戳
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+# OAuthSession 已移除（未使用的遗留代码）
 
 
 def get_db():

@@ -75,6 +75,17 @@ from quota_router import router as quota_router
 app.include_router(quota_router)
 logger.info("Quota router registered successfully")
 
+# 导入并注册用户初始化路由
+from user_router import router as user_router
+app.include_router(user_router)
+logger.info("User router registered successfully")
+
+# 导入并注册认证路由（旧版用户名密码，已隐藏文档）
+# 注释掉：已改用 JWT 认证，不再需要旧的用户名密码认证
+# from auth_router import router as auth_router
+# app.include_router(auth_router)
+# logger.info("Auth router registered successfully")
+
 # 导入并注册表单路由
 from form_router import router as form_router
 app.include_router(form_router)
@@ -99,6 +110,11 @@ async def startup_event():
     try:
         init_db()
         logger.info("Database tables initialized successfully")
+        # 初始化认证相关的表（已注释，使用JWT认证）
+        # from auth_router import init_auth_tables
+        # init_auth_tables()
+        from user_router import init_user_tables
+        init_user_tables()
     except Exception as e:
         logger.error(f"Failed to initialize database tables: {e}")
         # 不抛出异常，允许应用继续启动（表可能已存在）
@@ -137,6 +153,13 @@ try:
 except ImportError as e:
     logger.error(f"Auth service module failed to load: {e}")
 
+# 导入认证依赖
+try:
+    from auth_dependencies import get_current_user_info
+    logger.info("Auth dependencies loaded")
+except ImportError as e:
+    logger.error(f"Auth dependencies failed to load: {e}")
+
 # user oauth tokens (已移除 OAuth，仅作兼容留空)
 USER_TOKENS = {}
 
@@ -148,21 +171,31 @@ USER_TOKENS = {}
 @app.post("/api/sign/upload", tags=["签名"], summary="上传签名文件")
 async def upload_signature(
     request: Request,
-    file: UploadFile = File(..., description="签名图片文件"),
-    open_id: str = Form(..., description="用户 open_id"),
-    tenant_key: str = Form(..., description="租户 key"),
-    file_name: str = Form("signature.png", description="文件名"),
-    folder_token: Optional[str] = Form(None, description="目标文件夹 token"),
+    file: UploadFile = File(..., description="签名图片文件（必填）"),
+    file_name: str = Form(..., min_length=1, description="文件名（必填）"),
+    folder_token: str = Form(..., min_length=1, description="目标文件夹 token（必填）"),
     has_quota: int = Form(0, description="飞书官方付费权益 (1=有权益, 0=无)"),
-    db: Session = Depends(get_db),  # 注入共享库会话
+    user_info: dict = Depends(get_current_user_info),
+    db: Session = Depends(get_db),
 ):
     """
     上传签名文件到飞书云空间（使用授权码模式）。
     
-    - **身份识别**: 使用前端获取的 open_id
+    - **身份识别**: 从 JWT Token 中提取用户信息
+    - **文件信息**: file_name 和 folder_token 必填
     - **鉴权模式**: 使用 PersonalBaseToken (授权码)
     - **付费权益**: 如果 has_quota=1，跳过本地配额扣减
     """
+    # 从 JWT 中获取用户信息
+    open_id = user_info['open_id']
+    tenant_key = user_info['tenant_key']
+    
+    # 参数验证
+    if not file_name:
+        raise HTTPException(status_code=400, detail="file_name 为必填参数")
+    
+    if not folder_token:
+        raise HTTPException(status_code=400, detail="folder_token 为必填参数")
     # Debug logging
     logger.info(f"Upload request (BaseToken mode): open_id={open_id}, folder_token={folder_token}, file_name={file_name}, has_quota={has_quota}")
     
@@ -212,19 +245,10 @@ async def upload_signature(
     except ValueError as e:
         raise HTTPException(status_code=401, detail=str(e))
     
-    parent_type = "explorer"
-    parent_node = ""
-
-    if folder_token:
-        parent_type = "folder"
-        parent_node = folder_token
-        logger.info(f"Using provided folder_token: {folder_token}")
-    else:
-        # 使用个人空间根目录
-        logger.info("Using personal space root directory")
-        parent_type = "explorer"
-        parent_node = ""
-
+    # 使用指定的文件夹
+    parent_type = "folder"
+    parent_node = folder_token
+    logger.info(f"Using folder_token: {folder_token}")
 
     # 使用 Open API 域名（Drive API 专用）
     url_upload = auth_service.get_open_api_url("/open-apis/drive/v1/files/upload_all")
@@ -233,15 +257,13 @@ async def upload_signature(
     form_data = {
         "file_name": file_name,
         "parent_type": parent_type,
+        "parent_node": parent_node,
         "size": str(file_size),
     }
-    
-    if parent_node and parent_node != "root":
-        form_data["parent_node"] = parent_node
 
     files = {"file": (file_name, content, file.content_type or "image/png")}
     
-    logger.info(f"Uploading to Feishu Base API: url={url_upload}")
+    logger.info(f"Uploading to Feishu Base API: url={url_upload}, folder={parent_node}")
     
     try:
         r = requests.post(

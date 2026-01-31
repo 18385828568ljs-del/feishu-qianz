@@ -132,13 +132,30 @@ async function handleCreateShareForm({ tableId, userKey }, showToast) {
     }
 
     try {
+        // 按照原始字段顺序排序 selectedFields
+        const fieldOrderMap = new Map()
+        availableFields.value.forEach((field, index) => {
+            fieldOrderMap.set(field.field_id, index)
+        })
+        
+        const sortedSelectedFields = [...selectedFields.value].sort((a, b) => {
+            const orderA = fieldOrderMap.get(a.field_id) ?? 999
+            const orderB = fieldOrderMap.get(b.field_id) ?? 999
+            return orderA - orderB
+        })
+        
+        console.log('[useShareForm] 字段排序:', {
+            original: selectedFields.value.map(f => f.label),
+            sorted: sortedSelectedFields.map(f => f.label)
+        })
+        
         // 查找签名字段（附件类型）
-        const signatureField = selectedFields.value.find(f => f.input_type === 'attachment')
+        const signatureField = sortedSelectedFields.find(f => f.input_type === 'attachment')
 
         console.log('[useShareForm] 创建表单参数:', {
             record_index: selectedRecordIndex.value,
             show_data: showData.value,
-            selectedFieldsCount: selectedFields.value.length
+            selectedFieldsCount: sortedSelectedFields.length
         })
 
         const result = await createShareForm({
@@ -147,7 +164,7 @@ async function handleCreateShareForm({ tableId, userKey }, showToast) {
             app_token: currentAppToken.value,
             table_id: tableId,
             signature_field_id: signatureField?.field_id || null,
-            fields: selectedFields.value,
+            fields: sortedSelectedFields,  // 使用排序后的字段
             created_by: userKey,
             base_token: baseToken,  // 传递授权码
             record_index: selectedRecordIndex.value,
@@ -257,14 +274,12 @@ const formList = ref([])
 const loadingList = ref(false)
 
 /**
- * 加载表单历史
- * @param {string} userKey - 用户唯一标识
+ * 加载表单历史（使用JWT认证）
  */
-async function loadHistory(userKey) {
-    if (!userKey) return
+async function loadHistory() {
     try {
         loadingList.value = true
-        const result = await getShareFormList(userKey)
+        const result = await getShareFormList()
         if (result && result.forms) {
             formList.value = result.forms
         } else {

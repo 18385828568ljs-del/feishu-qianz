@@ -12,10 +12,6 @@ const props = defineProps({
     type: Boolean,
     default: false
   },
-  userInfo: {
-    type: Object,
-    default: () => ({ openId: '', tenantKey: '' })
-  },
   quotaInfo: {
     type: Object,
     default: () => ({ planExpiresAt: null })
@@ -161,20 +157,13 @@ async function startAlipayPayment() {
     return
   }
 
-  if (!props.userInfo.openId || !props.userInfo.tenantKey) {
-    emit('toast', { message: '用户信息不完整', type: 'error' })
-    return
-  }
-
   creatingOrder.value = true
   paymentStatus.value = 'pending'
 
   try {
-    // 创建支付宝订单
+    // 创建支付宝订单（用户信息从 JWT 中提取）
     const result = await createAlipayOrder(
       selectedPlan.value.id,
-      props.userInfo.openId,
-      props.userInfo.tenantKey,
       'native'  // 扫码支付
     )
 

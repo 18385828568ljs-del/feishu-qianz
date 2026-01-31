@@ -22,13 +22,11 @@ const canSign = computed(() => {
 })
 
 /**
- * 加载配额信息
- * @param {string} openId - 用户 openId
- * @param {string} tenantKey - 租户 key
+ * 加载配额信息（从 JWT Token 中自动获取用户信息）
  */
-async function loadQuota(openId, tenantKey) {
+async function loadQuota() {
     try {
-        const data = await getQuota(openId, tenantKey)
+        const data = await getQuota()
         quota.value = {
             remaining: data.remaining || 0,
             planQuota: data.plan_quota || 20,   // 默认免费试用 20 次

@@ -3,7 +3,8 @@
   支持两种模式：签名模式（显示签字板）和上传模式（显示文件选择器）
 -->
 <script setup>
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import SignaturePad from '../SignaturePad.vue'
 import FileUpload from './FileUpload.vue'
 
@@ -18,14 +19,22 @@ const props = defineProps({
   },
   mode: {
     type: String,
-    default: 'signature', // 'signature' | 'upload'
-    validator: (value) => ['signature', 'upload'].includes(value)
+    default: 'signature'
   },
   fieldName: {
     type: String,
     default: '签名区域'
+  },
+  userId: {
+    type: String,
+    default: ''
   }
 })
+
+// 调试：监听 userId 变化
+watch(() => props.userId, (newVal) => {
+  console.log('[SignatureCard] userId changed:', newVal)
+}, { immediate: true })
 
 const emit = defineEmits(['confirm', 'fileSelect', 'batchConfirm'])
 
@@ -44,6 +53,85 @@ const iconPath = computed(() => {
     : 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12'
 })
 
+// 格式化用户ID显示（前6位 + ***）
+const formattedUserId = computed(() => {
+  if (!props.userId) return ''
+  if (props.userId.length <= 8) return props.userId
+  return props.userId.substring(0, 6) + '***'
+})
+
+// 复制用户ID到剪贴板
+const copyUserId = (event) => {
+  event.stopPropagation()
+  
+  if (!props.userId) {
+    console.warn('[SignatureCard] No userId to copy')
+    return
+  }
+  
+  console.log('[SignatureCard] Attempting to copy:', props.userId)
+  
+  // 直接使用 execCommand（飞书环境禁用了 Clipboard API）
+  const textarea = document.createElement('textarea')
+  textarea.value = props.userId
+  textarea.style.position = 'fixed'
+  textarea.style.left = '-9999px'
+  textarea.style.top = '0'
+  textarea.setAttribute('readonly', '')
+  document.body.appendChild(textarea)
+  
+  // iOS 兼容
+  if (navigator.userAgent.match(/ipad|iphone/i)) {
+    const range = document.createRange()
+    range.selectNodeContents(textarea)
+    const selection = window.getSelection()
+    selection.removeAllRanges()
+    selection.addRange(range)
+    textarea.setSelectionRange(0, 999999)
+  } else {
+    textarea.select()
+  }
+  
+  try {
+    const successful = document.execCommand('copy')
+    document.body.removeChild(textarea)
+    
+    if (successful) {
+      console.log('[SignatureCard] Copy successful')
+      showCopySuccess()
+    } else {
+      console.error('[SignatureCard] Copy failed')
+      showManualCopyDialog()
+    }
+  } catch (err) {
+    console.error('[SignatureCard] Copy error:', err)
+    document.body.removeChild(textarea)
+    showManualCopyDialog()
+  }
+}
+
+// 显示手动复制对话框
+const showManualCopyDialog = () => {
+  ElMessage({
+    message: `用户ID: ${props.userId}`,
+    type: 'info',
+    duration: 0,
+    showClose: true,
+    dangerouslyUseHTMLString: true,
+    customClass: 'copy-fallback-message'
+  })
+}
+
+// 显示复制成功提示
+const showCopySuccess = () => {
+  console.log('[SignatureCard] User ID copied:', props.userId)
+  ElMessage.success({
+    message: '已复制用户ID',
+    duration: 1500,
+    showClose: false
+  })
+}
+
 function handleConfirm(blob) {
   emit('confirm', blob)
 }
@@ -55,6 +143,8 @@ function handleBatchConfirm(blob) {
 function handleFileSelect(file) {
   emit('fileSelect', file)
 }
+
+import { ArrowDown, Plus, User } from '@element-plus/icons-vue'
 </script>
 
 <template>
@@ -67,9 +157,26 @@ function handleFileSelect(file) {
         </svg>
         <span class="header-title">{{ title }}</span>
       </div>
-      <span class="status-chip" :class="{ 'status-ready': hasSelection && hasAttachField }">
-        {{ (hasSelection && hasAttachField) ? '就绪' : (!hasAttachField ? '不可用' : '未选中') }}
-      </span>
+      
+      <!-- 用户ID显示 -->
+      <div v-if="userId" class="user-id-badge">
+        <svg class="user-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+          <circle cx="12" cy="7" r="4"/>
+        </svg>
+        <span class="user-id-text" ref="userIdText" :title="`完整ID: ${userId}`">{{ formattedUserId }}</span>
+        <button 
+          class="copy-btn" 
+          @click="copyUserId"
+          :title="`点击复制完整ID`"
+          type="button"
+        >
+          <svg class="copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+          </svg>
+        </button>
+      </div>
     </div>
     
     <!-- 内容区域 -->
@@ -142,6 +249,64 @@ function handleFileSelect(file) {
   font-size: 14px;
   font-weight: 500;
   color: #1d1d1f;
+}
+
+/* 用户ID徽章 */
+.user-id-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 10px;
+  border-radius: 6px;
+  background: #f5f7fa;
+  border: 1px solid #e4e7ed;
+  transition: all 0.2s;
+}
+
+.user-id-badge:hover {
+  background: #ecf0f5;
+  border-color: #d3dae6;
+}
+
+.user-icon {
+  width: 14px;
+  height: 14px;
+  color: #606266;
+  flex-shrink: 0;
+}
+
+.user-id-text {
+  font-size: 11px;
+  color: #606266;
+  font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+  letter-spacing: 0.5px;
+}
+
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: all 0.2s;
+  color: #909399;
+}
+
+.copy-btn:hover {
+  background: #dcdfe6;
+  color: #606266;
+}
+
+.copy-btn:active {
+  transform: scale(0.95);
+}
+
+.copy-icon {
+  width: 12px;
+  height: 12px;
 }
 
 .status-chip {

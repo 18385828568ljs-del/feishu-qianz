@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from database import get_db, init_db
 import quota_service
+from validators import validate_user_params, validate_invite_code, validate_plan_id
+from auth_dependencies import get_current_user_info
 
 from user_db_manager import ensure_user_database, get_user_session
 
@@ -36,14 +38,10 @@ class InviteValidateRequest(BaseModel):
 
 class InviteRedeemRequest(BaseModel):
     code: str
-    open_id: str
-    tenant_key: str
 
 
 class CreateOrderRequest(BaseModel):
     plan_id: str
-    open_id: str
-    tenant_key: str
 
 
 class CreateInviteRequest(BaseModel):
@@ -55,8 +53,14 @@ class CreateInviteRequest(BaseModel):
 # ==================== 配额 API ====================
 
 @router.get("/quota/status")
-def get_quota_status(open_id: str, tenant_key: str, db: Session = Depends(get_db)):
-    """获取用户配额状态"""
+def get_quota_status(
+    user_info: dict = Depends(get_current_user_info),
+    db: Session = Depends(get_db)
+):
+    """获取用户配额状态（需要 JWT Token）"""
+    open_id = user_info['open_id']
+    tenant_key = user_info['tenant_key']
+    
     user_key = f"{open_id}::{tenant_key}"
     ensure_user_database(user_key)
     user_db = get_user_session(user_key)
@@ -67,8 +71,14 @@ def get_quota_status(open_id: str, tenant_key: str, db: Session = Depends(get_db
 
 
 @router.get("/quota/check")
-def check_can_sign(open_id: str, tenant_key: str, db: Session = Depends(get_db)):
-    """检查用户是否可以签名"""
+def check_can_sign(
+    user_info: dict = Depends(get_current_user_info),
+    db: Session = Depends(get_db)
+):
+    """检查用户是否可以签名（需要 JWT Token）"""
+    open_id = user_info['open_id']
+    tenant_key = user_info['tenant_key']
+    
     user_key = f"{open_id}::{tenant_key}"
     ensure_user_database(user_key)
     user_db = get_user_session(user_key)
@@ -80,9 +90,17 @@ def check_can_sign(open_id: str, tenant_key: str, db: Session = Depends(get_db))
 
 
 @router.post("/quota/consume")
-def consume_quota(open_id: str, tenant_key: str, file_token: str = None,
-                  file_name: str = None, count: int = 1, db: Session = Depends(get_db)):
-    """消耗配额(签名成功后调用)"""
+def consume_quota(
+    file_token: str = None,
+    file_name: str = None,
+    count: int = 1,
+    user_info: dict = Depends(get_current_user_info),
+    db: Session = Depends(get_db)
+):
+    """消耗配额(签名成功后调用)（需要 JWT Token）"""
+    open_id = user_info['open_id']
+    tenant_key = user_info['tenant_key']
+    
     user_key = f"{open_id}::{tenant_key}"
     ensure_user_database(user_key)
     user_db = get_user_session(user_key)
@@ -100,14 +118,30 @@ def consume_quota(open_id: str, tenant_key: str, file_token: str = None,
 @router.post("/invite/validate")
 def validate_invite(req: InviteValidateRequest, db: Session = Depends(get_db)):
     """验证邀请码是否有效（不消耗次数）"""
+    # 参数验证
+    validate_invite_code(req.code)
+    
     return quota_service.validate_invite_code(db, req.code)
 
 
 @router.post("/invite/redeem")
-def redeem_invite(req: InviteRedeemRequest, db: Session = Depends(get_db)):
-    """兑换邀请码"""
+def redeem_invite(
+    req: InviteRedeemRequest,
+    user_info: dict = Depends(get_current_user_info),
+    db: Session = Depends(get_db)
+):
+    """兑换邀请码（需要 JWT Token）"""
+    # 参数验证
+    validate_invite_code(req.code)
+    
+    # 从 JWT 中获取用户信息
+    open_id = user_info['open_id']
+    tenant_key = user_info['tenant_key']
+    
+    print(f"[Redeem Invite] code={req.code}, open_id={open_id}, tenant_key={tenant_key}")
+    
     # 获取用户库会话
-    user_key = quota_service.get_user_key(req.open_id, req.tenant_key)
+    user_key = quota_service.get_user_key(open_id, tenant_key)
     ensure_user_database(user_key)
     user_db = get_user_session(user_key)
     
@@ -116,8 +150,8 @@ def redeem_invite(req: InviteRedeemRequest, db: Session = Depends(get_db)):
             shared_db=db, 
             user_db=user_db, 
             code=req.code, 
-            open_id=req.open_id, 
-            tenant_key=req.tenant_key
+            open_id=open_id, 
+            tenant_key=tenant_key
         )
         if not result.get("success"):
             raise HTTPException(status_code=400, detail=result.get("error", "REDEEM_FAILED"))
@@ -136,9 +170,20 @@ def get_pricing_plans(db: Session = Depends(get_db)):
 
 
 @router.post("/payment/create", summary="创建支付订单")
-def create_order(req: CreateOrderRequest, db: Session = Depends(get_db)):
-    """创建支付订单"""
-    result = quota_service.create_order(db, req.plan_id, req.open_id, req.tenant_key)
+def create_order(
+    req: CreateOrderRequest,
+    user_info: dict = Depends(get_current_user_info),
+    db: Session = Depends(get_db)
+):
+    """创建支付订单（需要 JWT Token）"""
+    # 参数验证
+    validate_plan_id(req.plan_id)
+    
+    # 从 JWT 中获取用户信息
+    open_id = user_info['open_id']
+    tenant_key = user_info['tenant_key']
+    
+    result = quota_service.create_order(db, req.plan_id, open_id, tenant_key)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "CREATE_ORDER_FAILED"))
     return result
@@ -209,13 +254,24 @@ class AlipayOrderRequest(BaseModel):
 
 
 @router.post("/payment/alipay/create", summary="创建支付宝支付订单")
-def create_alipay_order(req: AlipayOrderRequest, db: Session = Depends(get_db)):
+def create_alipay_order(
+    req: AlipayOrderRequest,
+    user_info: dict = Depends(get_current_user_info),
+    db: Session = Depends(get_db)
+):
     """
-    创建支付宝支付订单
+    创建支付宝支付订单（需要 JWT Token）
     
     - pay_type: native（扫码支付）或 h5（H5支付）
     - 返回二维码URL或跳转URL
     """
+    # 参数验证
+    validate_plan_id(req.plan_id)
+    
+    # 从 JWT 中获取用户信息
+    open_id = user_info['open_id']
+    tenant_key = user_info['tenant_key']
+    
     import logging
     logger = logging.getLogger("uvicorn.error")
     
@@ -234,7 +290,7 @@ def create_alipay_order(req: AlipayOrderRequest, db: Session = Depends(get_db)):
             raise HTTPException(status_code=400, detail="套餐不存在")
         
         # 创建本地订单
-        order_result = quota_service.create_order(db, req.plan_id, req.open_id, req.tenant_key)
+        order_result = quota_service.create_order(db, req.plan_id, open_id, tenant_key)
         if not order_result.get("success"):
             logger.error(f"Failed to create local order: {order_result.get('error')}")
             raise HTTPException(status_code=400, detail=order_result.get("error", "创建订单失败"))
@@ -252,7 +308,7 @@ def create_alipay_order(req: AlipayOrderRequest, db: Session = Depends(get_db)):
         body = f"数签助手-{plan.name}"
         
         # 附加数据：用于回调时识别用户
-        attach = f"{req.open_id}|{req.tenant_key}|{req.plan_id}"
+        attach = f"{open_id}|{tenant_key}|{req.plan_id}"
         
         # 调用 YunGouOS 创建支付
         if req.pay_type == "h5":

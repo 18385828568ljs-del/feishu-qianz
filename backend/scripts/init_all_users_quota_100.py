@@ -21,7 +21,7 @@ from database import UserProfile  # noqa: E402
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-DEFAULT_QUOTA = int(os.getenv("DEFAULT_QUOTA", "100"))
+DEFAULT_QUOTA = int(os.getenv("DEFAULT_QUOTA", "20"))
 
 
 def main():
