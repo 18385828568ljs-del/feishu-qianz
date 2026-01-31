@@ -178,8 +178,8 @@
               </div>
             </div>
 
-            <!-- 输入区域：始终显示，允许用户覆盖 -->
-            <div class="attachment-input-area" :class="{ 'has-existing': existingAttachments[field.field_id]?.length > 0 }">
+            <!-- 输入区域：只有在没有现有附件时显示 -->
+            <div v-if="!existingAttachments[field.field_id] || existingAttachments[field.field_id].length === 0" class="attachment-input-area">
               <!-- 模式切换 -->
               <div class="mode-toggle">
                 <button 

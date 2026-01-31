@@ -229,7 +229,8 @@ function handleGoToFieldSelector() {
 async function handleCreate() {
   const success = await handleCreateShareForm({
     tableId: props.tableId,
-    userKey: props.userKey
+    userKey: props.userKey,
+    appToken: props.appToken
   }, showToast)
   
   if (success) {

@@ -248,8 +248,6 @@ from fastapi import Request
 class AlipayOrderRequest(BaseModel):
     """支付宝支付订单请求"""
     plan_id: str
-    open_id: str
-    tenant_key: str
     pay_type: str = "native"  # native 或 h5
 
 

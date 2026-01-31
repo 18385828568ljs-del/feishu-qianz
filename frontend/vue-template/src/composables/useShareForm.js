@@ -113,15 +113,32 @@ function goBackToBasicInfo() {
  * @param {string} params.userKey - 用户标识
  * @param {Function} showToast - Toast 通知函数
  */
-async function handleCreateShareForm({ tableId, userKey }, showToast) {
+async function handleCreateShareForm({ tableId, userKey, appToken }, showToast) {
     if (!shareFormName.value.trim()) {
         showToast?.('请输入表单名称', 'warning')
         return false
     }
 
+    // 优先使用传入的 appToken，其次使用内部状态
+    const targetAppToken = appToken || currentAppToken.value
+    console.log('[useShareForm] Checking token for app:', targetAppToken)
+
     // 检查是否配置了授权码
-    const baseToken = localStorage.getItem('feishu_base_token')
+    // NEW: 兼容新版多表格授权码
+    let baseToken = ''
+    if (targetAppToken) {
+        const tokens = JSON.parse(localStorage.getItem('feishu_base_tokens') || '{}')
+        baseToken = tokens[targetAppToken]
+        console.log('[useShareForm] Found token in new storage:', !!baseToken)
+    }
+    // Fallback: 如果没有取到，尝试旧的 key (虽然可能已经被清除了)
     if (!baseToken) {
+        baseToken = localStorage.getItem('feishu_base_token')
+        if (baseToken) console.log('[useShareForm] Found token in legacy storage')
+    }
+
+    if (!baseToken) {
+        console.warn('[useShareForm] No token found for app:', targetAppToken)
         showToast?.('请先点击“授权码”按钮配置您的授权码', 'warning')
         return false
     }
@@ -137,18 +154,18 @@ async function handleCreateShareForm({ tableId, userKey }, showToast) {
         availableFields.value.forEach((field, index) => {
             fieldOrderMap.set(field.field_id, index)
         })
-        
+
         const sortedSelectedFields = [...selectedFields.value].sort((a, b) => {
             const orderA = fieldOrderMap.get(a.field_id) ?? 999
             const orderB = fieldOrderMap.get(b.field_id) ?? 999
             return orderA - orderB
         })
-        
+
         console.log('[useShareForm] 字段排序:', {
             original: selectedFields.value.map(f => f.label),
             sorted: sortedSelectedFields.map(f => f.label)
         })
-        
+
         // 查找签名字段（附件类型）
         const signatureField = sortedSelectedFields.find(f => f.input_type === 'attachment')
 

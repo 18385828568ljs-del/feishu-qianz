@@ -51,13 +51,13 @@ if (DEBUG) console.log('[API] baseURL =', api.defaults.baseURL)
 api.interceptors.request.use(
   (config) => {
     if (DEBUG) console.log('[API]', config.method?.toUpperCase(), config.url)
-    
+
     // 从 localStorage 获取 JWT Token
     const token = localStorage.getItem('feishu_plugin_jwt_token')
     if (token) {
       config.headers.Authorization = `Bearer ${token}`
     }
-    
+
     return config
   },
   (error) => Promise.reject(error)
@@ -83,9 +83,9 @@ api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config
-    
+
     if (DEBUG) console.error('[API Error]', originalRequest?.url, error.response?.status)
-    
+
     // 如果返回 401 且未重试过，尝试刷新 Token
     if (error.response?.status === 401 && !originalRequest._retry) {
       if (isRefreshing) {
@@ -99,17 +99,22 @@ api.interceptors.response.use(
           return Promise.reject(err)
         })
       }
-      
+
       originalRequest._retry = true
       isRefreshing = true
-      
+
       try {
         if (DEBUG) console.log('[API] Token expired, attempting to refresh...')
-        
+
         // 重新初始化用户
         const { bitable } = await import('@lark-base-open/js-sdk')
-        const info = await bitable.bridge.getUserInfo()
-        
+        // MODIFIED: 0.5.0+ SDK remove getUserInfo, use getUserId/getTenantKey
+        const [uId, tKey] = await Promise.all([
+          bitable.bridge.getUserId(),
+          bitable.bridge.getTenantKey()
+        ])
+        const info = { userId: uId, tenantKey: tKey }
+
         // 生成设备指纹
         const generateFingerprint = () => {
           const nav = navigator
@@ -125,49 +130,49 @@ api.interceptors.response.use(
           ]
           return btoa(components.join('|'))
         }
-        
+
         const fingerprint = generateFingerprint()
-        
+
         // 调用初始化接口获取新 Token
         const initResult = await initUser(
           info.userId || info.openId,
           info.tenantKey,
           fingerprint
         )
-        
+
         // 保存新 Token
         localStorage.setItem('feishu_plugin_jwt_token', initResult.token)
         const expiryTime = Date.now() + (initResult.expires_in * 1000)
         localStorage.setItem('feishu_plugin_jwt_expiry', expiryTime.toString())
-        
+
         if (DEBUG) console.log('[API] Token refreshed successfully')
-        
+
         // 更新请求头
         api.defaults.headers.Authorization = `Bearer ${initResult.token}`
         originalRequest.headers.Authorization = `Bearer ${initResult.token}`
-        
+
         // 处理队列中的请求
         processQueue(null, initResult.token)
-        
+
         // 重试原请求
         return api(originalRequest)
       } catch (refreshError) {
         if (DEBUG) console.error('[API] Token refresh failed:', refreshError)
-        
+
         // 刷新失败，清除 Token
         processQueue(refreshError, null)
         localStorage.removeItem('feishu_plugin_jwt_token')
         localStorage.removeItem('feishu_plugin_jwt_expiry')
-        
+
         // 提示用户刷新页面
         console.warn('[API] Token refresh failed, please reload the page')
-        
+
         return Promise.reject(refreshError)
       } finally {
         isRefreshing = false
       }
     }
-    
+
     return Promise.reject(error)
   }
 )
@@ -198,7 +203,7 @@ export async function uploadSignature({ blob, fileName, folderToken, hasQuota = 
     // 兼容旧版本单一授权码
     baseToken = localStorage.getItem('feishu_base_token') || ''
   }
-  
+
   if (!baseToken) {
     throw new Error('未配置授权码，请先在插件中配置您的飞书授权码')
   }
@@ -310,7 +315,7 @@ export async function getTableFields(appToken, tableId) {
   // 使用新的多表格存储格式
   const tokens = JSON.parse(localStorage.getItem('feishu_base_tokens') || '{}')
   const baseToken = tokens[appToken] || localStorage.getItem('feishu_base_token') || ''
-  
+
   const { data } = await api.get('/api/form/table-fields', {
     params: { app_token: appToken, table_id: tableId, base_token: baseToken }
   })
@@ -322,7 +327,7 @@ export async function getRecordCount(appToken, tableId) {
   // 使用新的多表格存储格式
   const tokens = JSON.parse(localStorage.getItem('feishu_base_tokens') || '{}')
   const baseToken = tokens[appToken] || localStorage.getItem('feishu_base_token') || ''
-  
+
   const { data } = await api.get('/api/form/record-count', {
     params: { app_token: appToken, table_id: tableId, base_token: baseToken }
   })

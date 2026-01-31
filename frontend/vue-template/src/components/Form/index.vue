@@ -172,7 +172,15 @@ async function init() {
     
     try {
       // 检查是否在飞书环境中
-      if (!bitable || !bitable.bridge || !bitable.bridge.getUserInfo) {
+      // 检查是否在飞书环境中
+      let isFeishuEnv = bitable && bitable.bridge;
+      
+      // 兼容旧版本 SDK 的检查
+      if (isFeishuEnv && !bitable.bridge.getUserId && !bitable.bridge.getUserInfo) {
+          isFeishuEnv = false;
+      }
+
+      if (!isFeishuEnv) {
         console.warn('[Init] Not in Feishu environment, using development mode')
         
         // 开发模式：使用模拟数据
@@ -195,12 +203,27 @@ async function init() {
         }
       } else {
         // 正常模式：从飞书SDK获取
-        const info = await bitable.bridge.getUserInfo()
-        console.log('[Init] getUserInfo result:', info)
-        
-        if (info) {
-          openId = info.userId || info.openId
-          tenantKey = info.tenantKey
+        try {
+            // 优先尝试新的 API
+            if (bitable.bridge.getUserId && bitable.bridge.getTenantKey) {
+                 const [uId, tKey] = await Promise.all([
+                   bitable.bridge.getUserId(),
+                   bitable.bridge.getTenantKey()
+                 ])
+                 openId = uId
+                 tenantKey = tKey
+                 console.log('[Init] Got user info via new API:', { openId, tenantKey })
+            } else if (bitable.bridge.getUserInfo) {
+                 // 回退到旧 API
+                 const info = await bitable.bridge.getUserInfo()
+                 console.log('[Init] Got user info via old API:', info)
+                 if (info) {
+                   openId = info.userId || info.openId
+                   tenantKey = info.tenantKey
+                 }
+            }
+        } catch (err) {
+            console.error('[Init] Failed to get user info from SDK:', err)
         }
       }
       
@@ -238,15 +261,26 @@ async function init() {
       // 检查是否已有有效的 Token
       const existingToken = localStorage.getItem('feishu_plugin_jwt_token')
       const tokenExpiry = localStorage.getItem('feishu_plugin_jwt_expiry')
+      const cachedOpenId = localStorage.getItem('feishu_plugin_cached_openid')
       
       let needInit = true
       if (existingToken && tokenExpiry) {
-        const expiryTime = parseInt(tokenExpiry)
-        const now = Date.now()
-        // 如果 token 还有超过1小时有效期，则不需要重新初始化
-        if (expiryTime > now + 3600000) {
-          console.log('[Init] Using existing valid token')
-          needInit = false
+        // 如果缓存的 OpenId 存在且与当前不一致，强制刷新
+        if (cachedOpenId && cachedOpenId !== openId) {
+            console.warn('[Init] User mismatch (cached:', cachedOpenId, 'current:', openId, '), forcing re-init')
+            needInit = true
+        } else if (!cachedOpenId) {
+            // 如果只有 Token 但没有缓存的 OpenID（可能是旧版升级上来），为了安全起见，强制重新初始化
+            console.warn('[Init] Legacy token found without OpenID mapping, forcing re-init to ensure identity match')
+            needInit = true
+        } else {
+            const expiryTime = parseInt(tokenExpiry)
+            const now = Date.now()
+            // 如果 token 还有超过1小时有效期，则不需要重新初始化
+            if (expiryTime > now + 3600000) {
+              console.log('[Init] Using existing valid token')
+              needInit = false
+            }
         }
       }
       
@@ -262,6 +296,8 @@ async function init() {
           
           // 保存 JWT Token
           localStorage.setItem('feishu_plugin_jwt_token', initResult.token)
+          // 保存对应的 OpenId，防止用户切换导致的串号
+          localStorage.setItem('feishu_plugin_cached_openid', openId)
           
           // 保存过期时间（当前时间 + expires_in 秒）
           const expiryTime = Date.now() + (initResult.expires_in * 1000)

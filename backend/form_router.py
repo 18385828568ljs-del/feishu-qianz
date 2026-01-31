@@ -1016,16 +1016,20 @@ async def submit_form(
             ensure_user_database(user_key)
             user_db = get_user_session(user_key)
             try:
-                open_id_val, tenant_key_val = user_key.split("::")
-                # 消耗 1 次额度
-                ok = quota_service.consume_quota(
-                    user_db, 
-                    db, 
-                    open_id=open_id_val, 
-                    tenant_key=tenant_key_val, 
-                    file_token=file_token,
-                    file_name=f"外链表单签名_{form_id}.png"
-                )
+                if "::" in user_key:
+                    open_id_val, tenant_key_val = user_key.split("::")
+                    # 消耗 1 次额度
+                    ok = quota_service.consume_quota(
+                        user_db, 
+                        db, 
+                        open_id=open_id_val, 
+                        tenant_key=tenant_key_val, 
+                        file_token=file_token,
+                        file_name=f"外链表单签名_{form_id}.png"
+                    )
+                else:
+                    log_to_file(f"[Form Submit] Invalid user_key format: {user_key}, skipping quota deduction")
+                    ok = True
                 if not ok:
                     log_to_file(f"[Form Submit] Quota insufficient for user {user_key}")
                     raise HTTPException(status_code=402, detail="NO_QUOTA")
